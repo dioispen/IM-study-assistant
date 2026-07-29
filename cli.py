@@ -4,7 +4,15 @@ question and get a cited answer with source cards."""
 import argparse
 import sys
 
-from config import DEFAULT_LANGUAGE, DOMAINS, EMBEDDING_MODEL, GENERATION_MODEL, REGISTRY_PATH, TOP_K
+from config import (
+    DEFAULT_LANGUAGE,
+    DISTANCE_THRESHOLD,
+    DOMAINS,
+    EMBEDDING_MODEL,
+    GENERATION_MODEL,
+    REGISTRY_PATH,
+    TOP_K,
+)
 from core.ask import ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
@@ -34,13 +42,36 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
+    # Asserted before the store is opened or a key is needed: a tau belonging
+    # to another embedding model is a misconfiguration, not a bad answer.
+    threshold = DISTANCE_THRESHOLD.for_model(EMBEDDING_MODEL)
+
     store = VectorStore()
     embedder = OpenAIEmbedder(model=EMBEDDING_MODEL)
     generator = OpenAIGenerator(model=GENERATION_MODEL)
 
-    answer = ask(args.question, embedder, store, generator, top_k=args.top_k)
+    answer = ask(
+        args.question,
+        embedder,
+        store,
+        generator,
+        top_k=args.top_k,
+        distance_threshold=threshold,
+    )
 
     print(answer.text)
+    if answer.abstained:
+        # An abstention is the one moment an underived tau visibly costs the
+        # reader an answer, so that is where it admits it is underived.
+        if DISTANCE_THRESHOLD.provisional:
+            print()
+            print(
+                f"(The distance gate used tau={DISTANCE_THRESHOLD.value}, hand-set for "
+                f"{DISTANCE_THRESHOLD.embedding_model} and not yet derived from the "
+                "eval sweep — see ADR-0003.)"
+            )
+        return
+
     print()
     print("Sources:")
     for chunk in answer.evidence:
@@ -63,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser = subparsers.add_parser("ask", help="Ask a question")
     ask_parser.add_argument("question")
     ask_parser.add_argument("--top-k", type=int, default=TOP_K)
+    # No --distance-threshold override: ADR-0003 has tau swept and read off by
+    # a stated rule, never hand-tuned per invocation, and a per-call float
+    # would slip past the embedding-model pairing that DistanceThreshold exists
+    # to enforce.
     ask_parser.set_defaults(func=cmd_ask)
 
     return parser
