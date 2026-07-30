@@ -52,7 +52,28 @@ class VectorStore:
                 "leaves distances scored in the old space."
             )
 
-    def upsert_chunks(self, records: list[ChunkRecord], embeddings: list[list[float]]) -> None:
+    def replace_document_chunks(
+        self, doc_id: str, records: list[ChunkRecord], embeddings: list[list[float]]
+    ) -> None:
+        """Make `records` the *only* Chunks the collection holds for `doc_id`.
+
+        The one write path into the collection, because the invariant it
+        enforces -- a doc_id never has two generations of Chunks live at once
+        -- cannot be enforced by a caller that only ever adds. ADR-0001 names
+        exactly this hazard ("a changed source file leaves undetectable stale
+        chunks behind"): a re-chunked Document that yields fewer Chunks than
+        last time leaves the tail of the old generation retrievable, with
+        nothing in the registry to reveal it.
+        """
+        stray = {r.doc_id for r in records} - {doc_id}
+        if stray:
+            raise ValueError(
+                f"replace_document_chunks({doc_id!r}) was given records belonging "
+                f"to {sorted(stray)!r}; it deletes by doc_id, so those Chunks "
+                "would be written without their own generation being cleared."
+            )
+
+        self.collection.delete(where={"doc_id": doc_id})
         self.collection.upsert(
             ids=[r.chunk_id for r in records],
             embeddings=embeddings,

@@ -4,6 +4,7 @@ FakeGenerator) and asserts only on retrieved doc_ids and Locators -- never on
 generated text (ADR-0002).
 """
 
+import shutil
 from pathlib import Path
 
 from core.ask import ask
@@ -45,13 +46,13 @@ SCHEDULING_ID = derive_doc_id("os/process_scheduling.md")
 DEADLOCK_ID = derive_doc_id("os/deadlock.md")
 
 
-def _ingest_corpus(tmp_path):
+def _ingest_corpus(tmp_path, fixtures=FIXTURES):
     registry = Registry(tmp_path / "documents.sqlite")
     store = VectorStore(path=tmp_path / "chroma")
     embedder = FakeEmbedder()
 
     dsa_report = ingest_folder(
-        folder=FIXTURES / "dsa",
+        folder=fixtures / "dsa",
         domain="dsa",
         source_type="note",
         registry=registry,
@@ -61,7 +62,7 @@ def _ingest_corpus(tmp_path):
         max_tokens=MAX_TOKENS,
     )
     os_report = ingest_folder(
-        folder=FIXTURES / "os",
+        folder=fixtures / "os",
         domain="os",
         source_type="note",
         registry=registry,
@@ -112,6 +113,48 @@ def test_reingesting_an_unchanged_folder_skips_every_document(tmp_path):
     assert first.skipped == []
     assert second.ingested == []
     assert second.skipped == [BST_ID]
+
+
+def test_running_ingestion_twice_over_the_same_corpus_changes_nothing(tmp_path):
+    _registry, store, _embedder, dsa, os_ = _ingest_corpus(tmp_path)
+    after_one_run = store.collection.get()["ids"]
+
+    _registry, store, _embedder, dsa_again, os_again = _ingest_corpus(tmp_path)
+
+    after_two_runs = store.collection.get()["ids"]
+    assert sorted(after_two_runs) == sorted(after_one_run)
+    assert len(after_two_runs) == len(set(after_two_runs))
+    # Pinned so the assertion above can't pass vacuously for the wrong reason:
+    # every Document really did take the unchanged-skip path.
+    assert (dsa_again.skipped, os_again.skipped) == (dsa.ingested, os_.ingested)
+
+
+def test_re_ingesting_an_edited_corpus_leaves_no_duplicate_or_stale_chunks(tmp_path):
+    # The teeth of the idempotency claim: the run above is all registry skips,
+    # so only an edited corpus exercises the replace path at the seam. The
+    # fixtures are copied first because they are repo files.
+    corpus = tmp_path / "notes"
+    shutil.copytree(FIXTURES, corpus)
+    _registry, store, _embedder, _dsa, _first = _ingest_corpus(tmp_path, fixtures=corpus)
+    # deadlock.md is the fixture that chunks into two, so shrinking it to one
+    # is what forces the old generation's tail to be deleted rather than
+    # merely overwritten -- the case a blind upsert would leave stale.
+    assert len(store.collection.get(where={"doc_id": DEADLOCK_ID})["ids"]) == 2
+    (corpus / "os" / "deadlock.md").write_text(
+        "# Deadlock\n\n## Conditions\n\nA rewrite far shorter than the note it "
+        "replaces, saying nothing about preemption at all.\n",
+        encoding="utf-8",
+    )
+
+    _registry, store, _embedder, _dsa, second = _ingest_corpus(tmp_path, fixtures=corpus)
+
+    assert second.ingested == [DEADLOCK_ID]
+    assert second.skipped == [SCHEDULING_ID]
+    ids = store.collection.get()["ids"]
+    assert len(ids) == len(set(ids))
+    deadlock = store.collection.get(where={"doc_id": DEADLOCK_ID})
+    assert deadlock["ids"] == [f"{DEADLOCK_ID}:000"]
+    assert not any("circular wait" in text for text in deadlock["documents"])
 
 
 def test_oversized_section_becomes_multiple_chunks_sharing_one_locator(tmp_path):

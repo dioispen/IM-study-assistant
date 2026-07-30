@@ -35,10 +35,11 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         embedder=embedder,
         language=args.language,
     )
-    print(
-        f"Ingested {len(report.ingested)} document(s), "
-        f"skipped {len(report.skipped)} unchanged."
-    )
+    print(report.summary())
+    # Failures go to stderr and name the file: a garbled note is a run the
+    # reader has to act on, not a silent gap in the corpus.
+    for failure in report.failed:
+        print(failure.warning(), file=sys.stderr)
 
 
 def cmd_ask(args: argparse.Namespace) -> None:
@@ -104,11 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    # Titles and Locators may contain non-ASCII (Markdown notes are zh-tw by
-    # default; Locators use "›"). Windows consoles often default stdout to a
-    # legacy codepage that can't encode either, so force UTF-8 here.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+    # Titles, Locators and source paths may contain non-ASCII (Markdown notes
+    # are zh-tw by default; Locators use "›"). Windows consoles often default
+    # to a legacy codepage that can't encode either, so force UTF-8 on both
+    # streams -- ingest failures name their file on stderr.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
 
     parser = build_parser()
     args = parser.parse_args(argv)
