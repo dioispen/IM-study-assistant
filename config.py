@@ -25,9 +25,12 @@ REGISTRY_PATH = DATA_DIR / "documents.sqlite"
 CHROMA_PATH = DATA_DIR / "chroma"
 CHUNK_COLLECTION_NAME = "chunks"
 
-# Section token thresholds for structured chunking. "Tokens" here means
-# whitespace-split words (see core/chunking.py) -- a placeholder measure
-# until a real tokenizer is picked (deferred to Week 5 tuning per PLAN.md).
+# Section token thresholds for structured chunking. "Tokens" here means what
+# core/tokenization.py counts: one CJK codepoint is one token, and a run of
+# non-CJK word characters is one token. That heuristic is a placeholder --
+# close enough to a real tokenizer in both languages for these numbers to
+# mean roughly the same thing in each -- until a real tokenizer is picked
+# (deferred to Week 5 tuning per PLAN.md).
 MIN_SECTION_TOKENS = 40
 MAX_SECTION_TOKENS = 300
 
