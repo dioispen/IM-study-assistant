@@ -5,8 +5,8 @@ CJK codepoint as one token and a run of non-CJK word characters as one token.
 It lives in `core/tokenization.py`, which is the only place in the codebase
 that decides what a token is, and it exposes each token's span in the source
 text as well as its string. Both production chunking and the offline
-`FakeEmbedder` are meant to count with it — chunking measures the length of the
-token list, the test double hashes the token strings.
+`FakeEmbedder` count with it — chunking measures the length of the token list,
+the test double hashes the token strings.
 
 Whitespace-split words, the measure this replaces, cannot work for the corpus
 this system exists to serve. Chinese does not delimit words with whitespace, so

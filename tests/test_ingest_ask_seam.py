@@ -44,9 +44,20 @@ class ExplodingGenerator:
 BST_ID = derive_doc_id("dsa/binary_search_tree.md")
 SCHEDULING_ID = derive_doc_id("os/process_scheduling.md")
 DEADLOCK_ID = derive_doc_id("os/deadlock.md")
+HANDSHAKE_ID = derive_doc_id("network/tcp_handshake.md")
+OSI_ID = derive_doc_id("network/osi_model.md")
+
+ZH_HANDSHAKE_QUESTION = "三向交握的第三個封包由用戶端送出"
+ZH_LAYERING_QUESTION = "應用層之下依序是哪幾層"
 
 
 def _ingest_corpus(tmp_path, fixtures=FIXTURES):
+    """The English corpus, and the one the gate tests read distances off.
+
+    The Chinese fixtures are ingested by `_ingest_with_chinese` instead of
+    being added here; see its docstring for why folding the two together makes
+    the gate's out-of-corpus trap vacuous.
+    """
     registry = Registry(tmp_path / "documents.sqlite")
     store = VectorStore(path=tmp_path / "chroma")
     embedder = FakeEmbedder()
@@ -72,6 +83,34 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
         max_tokens=MAX_TOKENS,
     )
     return registry, store, embedder, dsa_report, os_report
+
+
+def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
+    """The English corpus with the Chinese one ingested alongside it.
+
+    Deliberately not folded into `_ingest_corpus`, because the gate tests read
+    distances off that store. FakeEmbedder hashes into 64 buckets and a
+    40-token Chinese section fills 39 of them, so a five-word English query
+    collides with a Chinese Chunk on roughly half its words by chance -- the
+    out-of-corpus trap lands at 0.67, inside GATE_TAU, and abstains for no
+    reason connected to what it asks about. That is an artifact of the offline
+    double's dimensionality rather than anything the pipeline does (real
+    embeddings are cross-lingual and 1536-dimensional), but it would make the
+    trap prove nothing, so the gate keeps the corpus its geometry was pinned
+    against and the Chinese tests take this one.
+    """
+    registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path, fixtures=fixtures)
+    report = ingest_folder(
+        folder=fixtures / "network",
+        domain="network",
+        source_type="note",
+        registry=registry,
+        store=store,
+        embedder=embedder,
+        min_tokens=MIN_TOKENS,
+        max_tokens=MAX_TOKENS,
+    )
+    return registry, store, embedder, report
 
 
 def test_ingest_populates_the_registry_with_every_fixture_document(tmp_path):
@@ -231,6 +270,143 @@ def test_ask_never_asserts_on_generated_text_only_on_evidence(tmp_path):
 
     assert isinstance(answer.text, str) and answer.text
     assert all(isinstance(chunk.doc_id, str) for chunk in answer.evidence)
+
+
+# Chinese corpus. Every fixture above is English, which is how a Chinese note
+# collapsing into one Chunk survived a green suite; these ingest and ask in the
+# language the corpus is actually written in (PLAN.md: notes are zh-tw).
+
+
+def test_chinese_documents_enter_the_registry_under_their_own_domain(tmp_path):
+    registry, _store, _embedder, report = _ingest_with_chinese(tmp_path)
+
+    docs = {doc.doc_id: doc for doc in registry.list()}
+    assert set(report.ingested) == {HANDSHAKE_ID, OSI_ID}
+    assert docs[HANDSHAKE_ID].domain == docs[OSI_ID].domain == "network"
+    assert docs[HANDSHAKE_ID].title == "tcp handshake"
+
+
+def test_a_chinese_document_chunks_into_its_sections_with_chunk_id_ordinals(tmp_path):
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    handshake = store.collection.get(where={"doc_id": HANDSHAKE_ID})
+    osi = store.collection.get(where={"doc_id": OSI_ID})
+
+    assert sorted(handshake["ids"]) == [f"{HANDSHAKE_ID}:{i:03d}" for i in range(4)]
+    assert {m["locator"] for m in handshake["metadatas"]} == {
+        "傳輸控制協定 › 三向交握",
+        "傳輸控制協定 › 連線終止",
+    }
+    assert sorted(osi["ids"]) == [f"{OSI_ID}:{i:03d}" for i in range(2)]
+    assert {m["locator"] for m in osi["metadatas"]} == {
+        "OSI 參考模型 › 分層架構",
+        "OSI 參考模型 › 封裝",
+    }
+
+
+def test_an_oversized_chinese_section_splits_into_chunks_sharing_one_locator(tmp_path):
+    # The branch a whitespace assumption cannot reach: 三向交握 counts as one
+    # word split on whitespace, so it would never read as oversized at all.
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    result = store.collection.get(where={"doc_id": HANDSHAKE_ID})
+    # Sorted by ordinal rather than trusting the order `get` returns, because
+    # the assertion below reads the pieces as a sequence.
+    in_order = sorted(
+        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
+    )
+    handshake_texts = [
+        text for meta, text in in_order if meta["locator"] == "傳輸控制協定 › 三向交握"
+    ]
+
+    assert len(handshake_texts) == 3
+    assert "".join(handshake_texts).startswith("用戶端先送出 SYN 封包")
+    assert not any("四次揮手" in text for text in handshake_texts)
+
+
+def test_an_undersized_chinese_section_merges_into_its_neighbour(tmp_path):
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    result = store.collection.get(where={"doc_id": OSI_ID})
+    text_by_locator = dict(
+        zip((m["locator"] for m in result["metadatas"]), result["documents"])
+    )
+
+    assert "OSI 參考模型 › 概述" not in text_by_locator
+    assert "分層的目的是解耦。" in text_by_locator["OSI 參考模型 › 分層架構"]
+
+
+def test_asking_a_chinese_question_retrieves_the_document_its_vocabulary_matches(tmp_path):
+    _registry, store, embedder, _report = _ingest_with_chinese(tmp_path)
+
+    answer = ask(
+        ZH_HANDSHAKE_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    [top] = answer.evidence
+    assert top.doc_id == HANDSHAKE_ID
+    assert top.locator == "傳輸控制協定 › 三向交握"
+    assert top.domain == "network"
+
+
+def test_a_different_chinese_question_retrieves_the_other_chinese_document(tmp_path):
+    # Two Chinese Documents in one Domain, so the assertion above cannot pass
+    # merely because the question was the only Chinese text in the store.
+    _registry, store, embedder, _report = _ingest_with_chinese(tmp_path)
+
+    answer = ask(
+        ZH_LAYERING_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    [top] = answer.evidence
+    assert top.doc_id == OSI_ID
+    assert top.locator == "OSI 參考模型 › 分層架構"
+
+
+def test_reingesting_the_unchanged_chinese_corpus_skips_every_document(tmp_path):
+    _registry, _store, _embedder, first = _ingest_with_chinese(tmp_path)
+
+    _registry, _store, _embedder, second = _ingest_with_chinese(tmp_path)
+
+    assert second.ingested == []
+    assert second.skipped == first.ingested
+
+
+def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
+    # An ideographic space is whitespace, so this Document has headings and no
+    # prose. Recording it as ingested would put a Document in the registry that
+    # contributes no Chunk to any answer.
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "empty.md").write_text("# 網路\n\n## 概述\n\n　　\n", encoding="utf-8")
+    registry = Registry(tmp_path / "documents.sqlite")
+
+    report = ingest_folder(
+        folder=folder,
+        domain="network",
+        source_type="note",
+        registry=registry,
+        store=VectorStore(path=tmp_path / "chroma"),
+        embedder=FakeEmbedder(),
+        min_tokens=MIN_TOKENS,
+        max_tokens=MAX_TOKENS,
+    )
+
+    assert report.ingested == []
+    [failure] = report.failed
+    assert failure.source_path == "network/empty.md"
+    assert "chunk" in failure.reason.lower()
+    assert registry.list() == []
 
 
 def _ask_through_the_gate(question, store, embedder, generator):
