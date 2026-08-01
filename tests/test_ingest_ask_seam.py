@@ -16,6 +16,11 @@ from core.store import VectorStore
 from ingestion.common import ingest_folder
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
+
+# The English fixtures are sized against this small pair, which keeps them
+# short enough to read in a diff. The Chinese fixtures are sized against the
+# thresholds config.py actually ships and are ingested with nothing overridden;
+# see `_ingest_with_chinese`.
 MIN_TOKENS = 10
 MAX_TOKENS = 45
 
@@ -86,14 +91,25 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
 
 
 def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
-    """The English corpus with the Chinese one ingested alongside it.
+    """The English corpus with the Chinese one ingested alongside it, the
+    Chinese folder at whatever thresholds config.py ships.
+
+    Overriding nothing there is the point. The Chinese fixtures used to be
+    ingested at MIN_TOKENS/MAX_TOKENS like the English ones, which meant the
+    split and merge branches fired only because this module had substituted a
+    smaller pair: the fixtures demonstrated the branches work at that pair and
+    said nothing about the configured one, under which `osi_model.md` still
+    collapsed into a single Chunk carrying only its last section's Locator. The
+    fixtures are now sized against the configured numbers instead, and the tests
+    below read the branches off those. The English fixtures keep the small pair
+    they are sized for; here they are retrieval competition, not the subject.
 
     Deliberately not folded into `_ingest_corpus`, because the gate tests read
-    distances off that store. FakeEmbedder hashes into 64 buckets and a
-    40-token Chinese section fills 39 of them, so a five-word English query
-    collides with a Chinese Chunk on roughly half its words by chance -- the
-    out-of-corpus trap lands at 0.67, inside GATE_TAU, and abstains for no
-    reason connected to what it asks about. That is an artifact of the offline
+    distances off that store. FakeEmbedder hashes into 64 buckets and every
+    Chinese Chunk sized for the configured thresholds fills at least 47 of
+    them, so a five-word English query collides with one on most of its words
+    by chance -- the out-of-corpus trap lands at 0.64, inside GATE_TAU, and
+    abstains for no reason connected to what it asks about. That is an artifact of the offline
     double's dimensionality rather than anything the pipeline does (real
     embeddings are cross-lingual and 1536-dimensional), but it would make the
     trap prove nothing, so the gate keeps the corpus its geometry was pinned
@@ -107,8 +123,6 @@ def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
         registry=registry,
         store=store,
         embedder=embedder,
-        min_tokens=MIN_TOKENS,
-        max_tokens=MAX_TOKENS,
     )
     return registry, store, embedder, report
 
@@ -274,7 +288,14 @@ def test_ask_never_asserts_on_generated_text_only_on_evidence(tmp_path):
 
 # Chinese corpus. Every fixture above is English, which is how a Chinese note
 # collapsing into one Chunk survived a green suite; these ingest and ask in the
-# language the corpus is actually written in (PLAN.md: notes are zh-tw).
+# language the corpus is actually written in (PLAN.md: notes are zh-tw), at the
+# thresholds config.py ships rather than the small pair the English ones use.
+#
+# The fixtures are sized so that one section of each branch exists under those
+# numbers: 三向交握 is oversized, 概述 is undersized, and 連線終止, 分層架構 and
+# 封裝 all sit between. No test here asserts a token count for a string -- the
+# measure behind the counts is a placeholder due for replacement in Week 5
+# (ADR-0004), so what is pinned is the chunking that came out of it.
 
 
 def test_chinese_documents_enter_the_registry_under_their_own_domain(tmp_path):
@@ -286,13 +307,15 @@ def test_chinese_documents_enter_the_registry_under_their_own_domain(tmp_path):
     assert docs[HANDSHAKE_ID].title == "tcp handshake"
 
 
-def test_a_chinese_document_chunks_into_its_sections_with_chunk_id_ordinals(tmp_path):
+def test_chinese_documents_chunk_into_their_sections_with_chunk_id_ordinals(tmp_path):
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
     handshake = store.collection.get(where={"doc_id": HANDSHAKE_ID})
     osi = store.collection.get(where={"doc_id": OSI_ID})
 
-    assert sorted(handshake["ids"]) == [f"{HANDSHAKE_ID}:{i:03d}" for i in range(4)]
+    # 三向交握 splits in two and 連線終止 stands alone, so three Chunks over two
+    # Locators; 概述 merges away, so two Chunks over the two Locators left.
+    assert sorted(handshake["ids"]) == [f"{HANDSHAKE_ID}:{i:03d}" for i in range(3)]
     assert {m["locator"] for m in handshake["metadatas"]} == {
         "傳輸控制協定 › 三向交握",
         "傳輸控制協定 › 連線終止",
@@ -304,36 +327,68 @@ def test_a_chinese_document_chunks_into_its_sections_with_chunk_id_ordinals(tmp_
     }
 
 
+def test_no_chinese_document_collapses_into_one_chunk_under_its_last_locator(tmp_path):
+    # The shape #11 was opened to fix, asserted directly rather than inferred
+    # from the counts above: a whole multi-section note as a single Chunk,
+    # citable only as whichever heading it happens to end under. It survived
+    # #13 because the Chinese seam ran at the small pair and never at the
+    # configured one.
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    for doc_id, last_locator in (
+        (HANDSHAKE_ID, "傳輸控制協定 › 連線終止"),
+        (OSI_ID, "OSI 參考模型 › 封裝"),
+    ):
+        result = store.collection.get(where={"doc_id": doc_id})
+
+        assert len(result["ids"]) > 1
+        assert {m["locator"] for m in result["metadatas"]} != {last_locator}
+
+
+def _texts_under(store, doc_id, locator):
+    """Every Chunk of `doc_id` carrying `locator`, in ordinal order.
+
+    Sorted rather than trusting the order `get` returns, because a caller
+    reading the pieces of a split section reads them as a sequence.
+    """
+    result = store.collection.get(where={"doc_id": doc_id})
+    in_order = sorted(
+        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
+    )
+    return [text for meta, text in in_order if meta["locator"] == locator]
+
+
 def test_an_oversized_chinese_section_splits_into_chunks_sharing_one_locator(tmp_path):
     # The branch a whitespace assumption cannot reach: 三向交握 counts as one
     # word split on whitespace, so it would never read as oversized at all.
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
-    result = store.collection.get(where={"doc_id": HANDSHAKE_ID})
-    # Sorted by ordinal rather than trusting the order `get` returns, because
-    # the assertion below reads the pieces as a sequence.
-    in_order = sorted(
-        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
-    )
-    handshake_texts = [
-        text for meta, text in in_order if meta["locator"] == "傳輸控制協定 › 三向交握"
-    ]
+    handshake_texts = _texts_under(store, HANDSHAKE_ID, "傳輸控制協定 › 三向交握")
 
-    assert len(handshake_texts) == 3
+    assert len(handshake_texts) == 2
     assert "".join(handshake_texts).startswith("用戶端先送出 SYN 封包")
     assert not any("四次揮手" in text for text in handshake_texts)
+
+
+def test_a_chinese_section_between_the_thresholds_becomes_one_chunk_of_its_own(tmp_path):
+    # Neither split nor merged: the case that has to hold for the two either
+    # side of it to mean anything, since a rule that always splits or always
+    # merges would satisfy them both.
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    termination_texts = _texts_under(store, HANDSHAKE_ID, "傳輸控制協定 › 連線終止")
+
+    assert len(termination_texts) == 1
+    assert "四次揮手" in termination_texts[0]
+    assert "SYN cookie" not in termination_texts[0]
 
 
 def test_an_undersized_chinese_section_merges_into_its_neighbour(tmp_path):
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
-    result = store.collection.get(where={"doc_id": OSI_ID})
-    text_by_locator = dict(
-        zip((m["locator"] for m in result["metadatas"]), result["documents"])
-    )
-
-    assert "OSI 參考模型 › 概述" not in text_by_locator
-    assert "分層的目的是解耦。" in text_by_locator["OSI 參考模型 › 分層架構"]
+    assert _texts_under(store, OSI_ID, "OSI 參考模型 › 概述") == []
+    [layering] = _texts_under(store, OSI_ID, "OSI 參考模型 › 分層架構")
+    assert "分層的目的是解耦" in layering
 
 
 def test_asking_a_chinese_question_retrieves_the_document_its_vocabulary_matches(tmp_path):
@@ -398,8 +453,6 @@ def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
         registry=registry,
         store=VectorStore(path=tmp_path / "chroma"),
         embedder=FakeEmbedder(),
-        min_tokens=MIN_TOKENS,
-        max_tokens=MAX_TOKENS,
     )
 
     assert report.ingested == []
