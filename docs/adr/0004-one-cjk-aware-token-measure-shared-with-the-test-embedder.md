@@ -23,10 +23,19 @@ Chinese in the right order of magnitude — `text-embedding-3-small` splits
 Chinese into roughly one to two tokens per character — so one pair of numbers
 keeps meaning roughly the same thing in both languages.
 
+The windowed chunking path for unstructured Documents does not exist yet. When
+it lands, its `window` and `overlap` are counted with this same function rather
+than a second measure of its own: a window sized in whitespace-words would
+swallow a whole Chinese page exactly as section thresholds swallowed a whole
+Chinese section, and two measures would leave Week 5 sweeping two sets of
+numbers against two definitions of a token.
+
 ## Consequences
 
-This is a placeholder, and stays one until Week 5 replaces it. Tests therefore
-pin chunking behaviour — how many Chunks a note became, which Locator each
+This is a placeholder, and stays one until Week 5 replaces it. Whoever does
+inherits every call site of `core/tokenization.py` and the obligation to
+re-sweep the thresholds behind them, because a new measure moves the counts
+those numbers were picked against. Tests therefore pin chunking behaviour — how many Chunks a note became, which Locator each
 carries — and never assert a token count for a string, so that replacing the
 measure does not mean rewriting the suite.
 
