@@ -3,6 +3,9 @@ question and get a cited answer with source cards."""
 
 import argparse
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from config import (
     DEFAULT_LANGUAGE,
@@ -129,6 +132,19 @@ def main(argv: list[str] | None = None) -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
+
+    # OPENAI_API_KEY reaches the OpenAI client through the environment, which
+    # is what lets core/openai_client.py stay zero-argument. Loading .env here
+    # rather than at import time preserves that module's laziness: importing
+    # config or anything under core still costs nothing and needs no key, so
+    # the offline tests are untouched by this.
+    #
+    # Pinned to the file beside this one, not searched for from the working
+    # directory, so `im-rag` run from elsewhere reads the same key. A real
+    # OPENAI_API_KEY already in the environment wins -- load_dotenv does not
+    # override, so a shell export or a CI secret beats a stale .env in a
+    # checkout, and .env is the fallback rather than the authority.
+    load_dotenv(Path(__file__).resolve().parent / ".env")
 
     parser = build_parser()
     args = parser.parse_args(argv)
