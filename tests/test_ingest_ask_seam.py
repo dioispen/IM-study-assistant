@@ -16,6 +16,11 @@ from core.store import VectorStore
 from ingestion.common import ingest_folder
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
+
+# The English fixtures are sized against this small pair, which keeps them
+# short enough to read in a diff. The Chinese fixtures are sized against the
+# thresholds config.py actually ships and are ingested with nothing overridden;
+# see `_ingest_with_chinese`.
 MIN_TOKENS = 10
 MAX_TOKENS = 45
 
@@ -50,6 +55,18 @@ OSI_ID = derive_doc_id("network/osi_model.md")
 ZH_HANDSHAKE_QUESTION = "三向交握的第三個封包由用戶端送出"
 ZH_LAYERING_QUESTION = "應用層之下依序是哪幾層"
 
+# The nested corpus: one Domain folder whose notes sit in subfolders, two of
+# them sharing a filename with a third at the folder's own level.
+NESTED_FIXTURES = FIXTURES / "mis"
+
+MIS_OVERVIEW_ID = derive_doc_id("mis/概述.md")
+DECISION_OVERVIEW_ID = derive_doc_id("mis/決策支援/概述.md")
+PROCESS_OVERVIEW_ID = derive_doc_id("mis/流程管理/概述.md")
+BPMN_ID = derive_doc_id("mis/流程管理/塑模/bpmn.md")
+
+NESTED_IDS = {MIS_OVERVIEW_ID, DECISION_OVERVIEW_ID, PROCESS_OVERVIEW_ID, BPMN_ID}
+ZH_BPMN_QUESTION = "閘道標示流程在此分支或匯流"
+
 
 def _ingest_corpus(tmp_path, fixtures=FIXTURES):
     """The English corpus, and the one the gate tests read distances off.
@@ -71,6 +88,7 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=fixtures,
     )
     os_report = ingest_folder(
         folder=fixtures / "os",
@@ -81,19 +99,31 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=fixtures,
     )
     return registry, store, embedder, dsa_report, os_report
 
 
 def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
-    """The English corpus with the Chinese one ingested alongside it.
+    """The English corpus with the Chinese one ingested alongside it, the
+    Chinese folder at whatever thresholds config.py ships.
+
+    Overriding nothing there is the point. The Chinese fixtures used to be
+    ingested at MIN_TOKENS/MAX_TOKENS like the English ones, which meant the
+    split and merge branches fired only because this module had substituted a
+    smaller pair: the fixtures demonstrated the branches work at that pair and
+    said nothing about the configured one, under which `osi_model.md` still
+    collapsed into a single Chunk carrying only its last section's Locator. The
+    fixtures are now sized against the configured numbers instead, and the tests
+    below read the branches off those. The English fixtures keep the small pair
+    they are sized for; here they are retrieval competition, not the subject.
 
     Deliberately not folded into `_ingest_corpus`, because the gate tests read
-    distances off that store. FakeEmbedder hashes into 64 buckets and a
-    40-token Chinese section fills 39 of them, so a five-word English query
-    collides with a Chinese Chunk on roughly half its words by chance -- the
-    out-of-corpus trap lands at 0.67, inside GATE_TAU, and abstains for no
-    reason connected to what it asks about. That is an artifact of the offline
+    distances off that store. FakeEmbedder hashes into 64 buckets and every
+    Chinese Chunk sized for the configured thresholds fills at least 47 of
+    them, so a five-word English query collides with one on most of its words
+    by chance -- the out-of-corpus trap lands at 0.64, inside GATE_TAU, and
+    abstains for no reason connected to what it asks about. That is an artifact of the offline
     double's dimensionality rather than anything the pipeline does (real
     embeddings are cross-lingual and 1536-dimensional), but it would make the
     trap prove nothing, so the gate keeps the corpus its geometry was pinned
@@ -107,8 +137,7 @@ def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
         registry=registry,
         store=store,
         embedder=embedder,
-        min_tokens=MIN_TOKENS,
-        max_tokens=MAX_TOKENS,
+        corpus_root=fixtures,
     )
     return registry, store, embedder, report
 
@@ -143,6 +172,7 @@ def test_reingesting_an_unchanged_folder_skips_every_document(tmp_path):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=FIXTURES,
     )
 
     first = ingest_folder(**kwargs)
@@ -274,7 +304,14 @@ def test_ask_never_asserts_on_generated_text_only_on_evidence(tmp_path):
 
 # Chinese corpus. Every fixture above is English, which is how a Chinese note
 # collapsing into one Chunk survived a green suite; these ingest and ask in the
-# language the corpus is actually written in (PLAN.md: notes are zh-tw).
+# language the corpus is actually written in (PLAN.md: notes are zh-tw), at the
+# thresholds config.py ships rather than the small pair the English ones use.
+#
+# The fixtures are sized so that one section of each branch exists under those
+# numbers: 三向交握 is oversized, 概述 is undersized, and 連線終止, 分層架構 and
+# 封裝 all sit between. No test here asserts a token count for a string -- the
+# measure behind the counts is a placeholder due for replacement in Week 5
+# (ADR-0004), so what is pinned is the chunking that came out of it.
 
 
 def test_chinese_documents_enter_the_registry_under_their_own_domain(tmp_path):
@@ -286,13 +323,15 @@ def test_chinese_documents_enter_the_registry_under_their_own_domain(tmp_path):
     assert docs[HANDSHAKE_ID].title == "tcp handshake"
 
 
-def test_a_chinese_document_chunks_into_its_sections_with_chunk_id_ordinals(tmp_path):
+def test_chinese_documents_chunk_into_their_sections_with_chunk_id_ordinals(tmp_path):
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
     handshake = store.collection.get(where={"doc_id": HANDSHAKE_ID})
     osi = store.collection.get(where={"doc_id": OSI_ID})
 
-    assert sorted(handshake["ids"]) == [f"{HANDSHAKE_ID}:{i:03d}" for i in range(4)]
+    # 三向交握 splits in two and 連線終止 stands alone, so three Chunks over two
+    # Locators; 概述 merges away, so two Chunks over the two Locators left.
+    assert sorted(handshake["ids"]) == [f"{HANDSHAKE_ID}:{i:03d}" for i in range(3)]
     assert {m["locator"] for m in handshake["metadatas"]} == {
         "傳輸控制協定 › 三向交握",
         "傳輸控制協定 › 連線終止",
@@ -304,36 +343,68 @@ def test_a_chinese_document_chunks_into_its_sections_with_chunk_id_ordinals(tmp_
     }
 
 
+def test_no_chinese_document_collapses_into_one_chunk_under_its_last_locator(tmp_path):
+    # The shape #11 was opened to fix, asserted directly rather than inferred
+    # from the counts above: a whole multi-section note as a single Chunk,
+    # citable only as whichever heading it happens to end under. It survived
+    # #13 because the Chinese seam ran at the small pair and never at the
+    # configured one.
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    for doc_id, last_locator in (
+        (HANDSHAKE_ID, "傳輸控制協定 › 連線終止"),
+        (OSI_ID, "OSI 參考模型 › 封裝"),
+    ):
+        result = store.collection.get(where={"doc_id": doc_id})
+
+        assert len(result["ids"]) > 1
+        assert {m["locator"] for m in result["metadatas"]} != {last_locator}
+
+
+def _texts_under(store, doc_id, locator):
+    """Every Chunk of `doc_id` carrying `locator`, in ordinal order.
+
+    Sorted rather than trusting the order `get` returns, because a caller
+    reading the pieces of a split section reads them as a sequence.
+    """
+    result = store.collection.get(where={"doc_id": doc_id})
+    in_order = sorted(
+        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
+    )
+    return [text for meta, text in in_order if meta["locator"] == locator]
+
+
 def test_an_oversized_chinese_section_splits_into_chunks_sharing_one_locator(tmp_path):
     # The branch a whitespace assumption cannot reach: 三向交握 counts as one
     # word split on whitespace, so it would never read as oversized at all.
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
-    result = store.collection.get(where={"doc_id": HANDSHAKE_ID})
-    # Sorted by ordinal rather than trusting the order `get` returns, because
-    # the assertion below reads the pieces as a sequence.
-    in_order = sorted(
-        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
-    )
-    handshake_texts = [
-        text for meta, text in in_order if meta["locator"] == "傳輸控制協定 › 三向交握"
-    ]
+    handshake_texts = _texts_under(store, HANDSHAKE_ID, "傳輸控制協定 › 三向交握")
 
-    assert len(handshake_texts) == 3
+    assert len(handshake_texts) == 2
     assert "".join(handshake_texts).startswith("用戶端先送出 SYN 封包")
     assert not any("四次揮手" in text for text in handshake_texts)
+
+
+def test_a_chinese_section_between_the_thresholds_becomes_one_chunk_of_its_own(tmp_path):
+    # Neither split nor merged: the case that has to hold for the two either
+    # side of it to mean anything, since a rule that always splits or always
+    # merges would satisfy them both.
+    _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    termination_texts = _texts_under(store, HANDSHAKE_ID, "傳輸控制協定 › 連線終止")
+
+    assert len(termination_texts) == 1
+    assert "四次揮手" in termination_texts[0]
+    assert "SYN cookie" not in termination_texts[0]
 
 
 def test_an_undersized_chinese_section_merges_into_its_neighbour(tmp_path):
     _registry, store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
-    result = store.collection.get(where={"doc_id": OSI_ID})
-    text_by_locator = dict(
-        zip((m["locator"] for m in result["metadatas"]), result["documents"])
-    )
-
-    assert "OSI 參考模型 › 概述" not in text_by_locator
-    assert "分層的目的是解耦。" in text_by_locator["OSI 參考模型 › 分層架構"]
+    assert _texts_under(store, OSI_ID, "OSI 參考模型 › 概述") == []
+    [layering] = _texts_under(store, OSI_ID, "OSI 參考模型 › 分層架構")
+    assert "分層的目的是解耦" in layering
 
 
 def test_asking_a_chinese_question_retrieves_the_document_its_vocabulary_matches(tmp_path):
@@ -398,8 +469,7 @@ def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
         registry=registry,
         store=VectorStore(path=tmp_path / "chroma"),
         embedder=FakeEmbedder(),
-        min_tokens=MIN_TOKENS,
-        max_tokens=MAX_TOKENS,
+        corpus_root=tmp_path,
     )
 
     assert report.ingested == []
@@ -407,6 +477,113 @@ def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
     assert failure.source_path == "network/empty.md"
     assert "chunk" in failure.reason.lower()
     assert registry.list() == []
+
+
+# Nested corpus. Every fixture folder above is one flat level, which is how
+# ingestion reading only the top level of the folder it was handed survived a
+# green suite: a corpus in subfolders reported "Ingested 0" and the student was
+# told nothing was wrong. These ingest a Domain folder whose notes sit one and
+# two subfolders down, at the thresholds config.py ships. The nesting rules
+# themselves are unit-tested in test_ingest_common.py; what these add is that
+# the corpus on disk really is nested, so the flat-only assumption cannot come
+# back unnoticed.
+
+
+def test_the_doc_ids_of_the_flat_fixture_corpus_survive_the_walk(tmp_path):
+    # Literals rather than derive_doc_id calls, and read off a real ingest
+    # rather than off the hash function: what must hold still is the doc_id
+    # ingestion assigns a note in a flat folder. A doc_id that shifts is a full
+    # re-embed of the corpus for no behavioural reason, and that stability is
+    # what ADR-0001's registry depends on -- so a future change to the walk, or
+    # to what a path is derived relative to, fails here rather than silently
+    # re-embedding.
+    registry, _store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    assert {doc.source_path: doc.doc_id for doc in registry.list()} == {
+        "dsa/binary_search_tree.md": "e90f373100c8",
+        "os/process_scheduling.md": "602b7656a373",
+        "os/deadlock.md": "16812f81788d",
+        "network/tcp_handshake.md": "11093ebca1a8",
+        "network/osi_model.md": "73c926e94948",
+    }
+
+
+def _ingest_nested(tmp_path, fixtures=NESTED_FIXTURES):
+    """The nested corpus, in its own registry and store.
+
+    Kept out of `_ingest_corpus` for the reason `_ingest_with_chinese` gives at
+    length: the gate tests read distances off that store, and Chinese Chunks
+    sized for the configured thresholds fill enough of FakeEmbedder's 64
+    buckets to pull the out-of-corpus trap inside GATE_TAU.
+    """
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    embedder = FakeEmbedder()
+    report = ingest_folder(
+        folder=fixtures,
+        domain="mis",
+        source_type="note",
+        registry=registry,
+        store=store,
+        embedder=embedder,
+        # The fixture tree, one folder above the Domain folder being ingested --
+        # the same root the other helpers pass, so `mis/...` is what a Document
+        # here is named by whichever helper put it in a registry.
+        corpus_root=fixtures.parent,
+    )
+    return registry, store, embedder, report
+
+
+def test_every_note_beneath_the_nested_corpus_is_ingested(tmp_path):
+    # Three of the four are named 概述.md -- one at the folder's own level and
+    # two in subfolders -- so the four distinct doc_ids and four source_paths
+    # are also what says none of them replaced another.
+    registry, _store, _embedder, report = _ingest_nested(tmp_path)
+
+    assert set(report.ingested) == NESTED_IDS
+    assert len(NESTED_IDS) == 4
+    assert {doc.source_path for doc in registry.list()} == {
+        "mis/概述.md",
+        "mis/決策支援/概述.md",
+        "mis/流程管理/概述.md",
+        "mis/流程管理/塑模/bpmn.md",
+    }
+
+
+def test_a_nested_note_is_cited_back_to_its_file_on_disk(tmp_path):
+    # The point of carrying the subfolder segments into source_path: an answer
+    # names a Chunk, and the Document behind it names a path that resolves.
+    registry, store, embedder, _report = _ingest_nested(tmp_path)
+
+    answer = ask(
+        ZH_BPMN_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    [top] = answer.evidence
+    assert top.doc_id == BPMN_ID
+    document = registry.get(BPMN_ID)
+    assert document.source_path == "mis/流程管理/塑模/bpmn.md"
+    # Resolved under the corpus root the helper passed, which is what following
+    # a citation back to disk actually has to hand.
+    assert (FIXTURES / document.source_path).is_file()
+
+
+def test_reingesting_the_unchanged_nested_corpus_skips_every_document(tmp_path):
+    # Not the flat skip test over again: the skip keys on a doc_id derived from
+    # the path relative to the folder, so a walk that yielded an absolute path
+    # -- or one relative to something else -- would re-ingest the whole nested
+    # corpus every run while the flat one still skipped.
+    _registry, _store, _embedder, first = _ingest_nested(tmp_path)
+
+    _registry, _store, _embedder, second = _ingest_nested(tmp_path)
+
+    assert second.ingested == []
+    assert sorted(second.skipped) == sorted(first.ingested)
 
 
 def _ask_through_the_gate(question, store, embedder, generator):

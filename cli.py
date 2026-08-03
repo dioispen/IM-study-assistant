@@ -18,7 +18,7 @@ from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.registry import Registry
 from core.store import VectorStore
-from ingestion.common import ingest_folder
+from ingestion.common import OutsideCorpusRoot, ingest_folder
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -26,15 +26,24 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     store = VectorStore()
     embedder = OpenAIEmbedder(model=EMBEDDING_MODEL)
 
-    report = ingest_folder(
-        folder=args.folder,
-        domain=args.domain,
-        source_type=args.source_type,
-        registry=registry,
-        store=store,
-        embedder=embedder,
-        language=args.language,
-    )
+    try:
+        report = ingest_folder(
+            folder=args.folder,
+            domain=args.domain,
+            source_type=args.source_type,
+            registry=registry,
+            store=store,
+            embedder=embedder,
+            language=args.language,
+        )
+    except OutsideCorpusRoot as error:
+        # A mistyped folder is the likeliest way to reach this, and the message
+        # already says what to do about it -- so it reads as an error rather
+        # than as a traceback the reader has to interpret. Raised before the
+        # walk, so no Document was read and no Chunk written.
+        print(f"ERROR: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
     print(report.summary())
     # Failures go to stderr and name the file: a garbled note is a run the
     # reader has to act on, not a silent gap in the corpus.
@@ -86,7 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser = subparsers.add_parser(
         "ingest", help="Ingest a folder of Markdown notes"
     )
-    ingest_parser.add_argument("folder", help="Folder containing .md files")
+    # No --corpus-root override, for the reason --distance-threshold has none:
+    # a Document is identified by its path below one root, and a per-run root
+    # would put that identity back in the hands of the invocation, which is
+    # exactly what the root exists to take it out of. Notes kept elsewhere move
+    # CORPUS_ROOT in config.py.
+    ingest_parser.add_argument(
+        "folder",
+        help="Folder of .md notes beneath the corpus root, including any in its subfolders",
+    )
     ingest_parser.add_argument("--domain", required=True, choices=DOMAINS)
     ingest_parser.add_argument("--source-type", default="note")
     ingest_parser.add_argument("--language", default=DEFAULT_LANGUAGE)

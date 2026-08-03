@@ -25,6 +25,24 @@ REGISTRY_PATH = DATA_DIR / "documents.sqlite"
 CHROMA_PATH = DATA_DIR / "chroma"
 CHUNK_COLLECTION_NAME = "chunks"
 
+# The root that Documents ingested *from disk* take their source_path from.
+# Ingestion is pointed at a folder beneath it, and a file's identity is the
+# path from here down rather than the path from whichever folder the run was
+# handed. Two consequences worth the setting living here rather than being
+# passed per run: the same note keeps one doc_id however ingestion is invoked,
+# and two same-named notes in different folders beneath the root cannot collide
+# onto one Document. Nothing absolute enters the derivation, so the same corpus
+# on another machine derives the same ids -- which is what ADR-0001's registry
+# is built on. To ingest notes kept elsewhere, point this at the root they
+# already share.
+#
+# Not every Source has a path on disk to be relative to: a Wikipedia Document
+# is identified by its article URL. What ADR-0001 asks of a source_path is that
+# it be stable and resolve back to where the Document came from, and a URL
+# already is both -- so a fetched Source derives its doc_id from that directly
+# and never reaches this root.
+CORPUS_ROOT = DATA_DIR / "corpus"
+
 # Section token thresholds for structured chunking. "Tokens" here means what
 # core/tokenization.py counts: one CJK codepoint is one token, and a run of
 # non-CJK word characters is one token. That heuristic is a placeholder --

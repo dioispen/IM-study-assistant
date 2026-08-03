@@ -71,9 +71,9 @@ Pointing it at `zh-hant/docs` itself today ingests `index.md` and reports
 Beyond the license: `tests/test_ingest_ask_seam.py` pins a specific retrieval
 geometry, and `_ingest_with_chinese` documents why the Chinese fixtures are
 kept out of the store the gate tests read distances off. `FakeEmbedder` hashes
-into 64 buckets, so a single 40-token Chinese section fills 39 of them and the
-out-of-corpus trap collapses from 0.82 to 0.67 by collision alone. Real corpus
-volume makes that far worse.
+into 64 buckets, so one Chinese Chunk sized for the configured thresholds fills
+at least 47 of them and the out-of-corpus trap collapses from 0.82 to 0.64 by
+collision alone. Real corpus volume makes that far worse.
 
 Committed fixtures also have to be deterministic and reviewable in a diff. A
 fetched corpus is neither. Its place is manual evaluation and chunking stress
