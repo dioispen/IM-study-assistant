@@ -88,6 +88,7 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=fixtures,
     )
     os_report = ingest_folder(
         folder=fixtures / "os",
@@ -98,6 +99,7 @@ def _ingest_corpus(tmp_path, fixtures=FIXTURES):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=fixtures,
     )
     return registry, store, embedder, dsa_report, os_report
 
@@ -135,6 +137,7 @@ def _ingest_with_chinese(tmp_path, fixtures=FIXTURES):
         registry=registry,
         store=store,
         embedder=embedder,
+        corpus_root=fixtures,
     )
     return registry, store, embedder, report
 
@@ -169,6 +172,7 @@ def test_reingesting_an_unchanged_folder_skips_every_document(tmp_path):
         embedder=embedder,
         min_tokens=MIN_TOKENS,
         max_tokens=MAX_TOKENS,
+        corpus_root=FIXTURES,
     )
 
     first = ingest_folder(**kwargs)
@@ -465,6 +469,7 @@ def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
         registry=registry,
         store=VectorStore(path=tmp_path / "chroma"),
         embedder=FakeEmbedder(),
+        corpus_root=tmp_path,
     )
 
     assert report.ingested == []
@@ -489,8 +494,9 @@ def test_the_doc_ids_of_the_flat_fixture_corpus_survive_the_walk(tmp_path):
     # rather than off the hash function: what must hold still is the doc_id
     # ingestion assigns a note in a flat folder. A doc_id that shifts is a full
     # re-embed of the corpus for no behavioural reason, and that stability is
-    # what ADR-0001's registry depends on -- so a future change to the walk
-    # fails here rather than silently re-embedding.
+    # what ADR-0001's registry depends on -- so a future change to the walk, or
+    # to what a path is derived relative to, fails here rather than silently
+    # re-embedding.
     registry, _store, _embedder, _report = _ingest_with_chinese(tmp_path)
 
     assert {doc.source_path: doc.doc_id for doc in registry.list()} == {
@@ -520,6 +526,10 @@ def _ingest_nested(tmp_path, fixtures=NESTED_FIXTURES):
         registry=registry,
         store=store,
         embedder=embedder,
+        # The fixture tree, one folder above the Domain folder being ingested --
+        # the same root the other helpers pass, so `mis/...` is what a Document
+        # here is named by whichever helper put it in a registry.
+        corpus_root=fixtures.parent,
     )
     return registry, store, embedder, report
 
@@ -558,7 +568,8 @@ def test_a_nested_note_is_cited_back_to_its_file_on_disk(tmp_path):
     assert top.doc_id == BPMN_ID
     document = registry.get(BPMN_ID)
     assert document.source_path == "mis/流程管理/塑模/bpmn.md"
-    # The fixture tree is laid out by Domain, so source_path resolves under it.
+    # Resolved under the corpus root the helper passed, which is what following
+    # a citation back to disk actually has to hand.
     assert (FIXTURES / document.source_path).is_file()
 
 

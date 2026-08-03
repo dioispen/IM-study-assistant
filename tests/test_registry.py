@@ -13,8 +13,8 @@ def test_content_hash_changes_when_text_changes():
     assert content_hash("hello") != content_hash("hello world")
 
 
-def make_document(doc_id="abc123", content_hash_value="hash1"):
-    return Document(
+def make_document(doc_id="abc123", content_hash_value="hash1", **overrides):
+    fields = dict(
         doc_id=doc_id,
         title="Red-Black Trees",
         domain="dsa",
@@ -24,6 +24,8 @@ def make_document(doc_id="abc123", content_hash_value="hash1"):
         content_hash=content_hash_value,
         ingested_at="2026-07-27",
     )
+    fields.update(overrides)
+    return Document(**fields)
 
 
 def test_upsert_then_get_round_trips_a_document(tmp_path):
@@ -51,13 +53,30 @@ def test_upsert_replaces_existing_document_with_the_same_doc_id(tmp_path):
     assert len(registry.list()) == 1
 
 
-def test_unchanged_is_true_only_when_hash_matches_the_stored_document(tmp_path):
+def test_unchanged_is_true_only_when_the_stored_document_matches(tmp_path):
     registry = Registry(tmp_path / "documents.sqlite")
     registry.upsert(make_document(content_hash_value="hash1"))
 
-    assert registry.unchanged("abc123", "hash1") is True
-    assert registry.unchanged("abc123", "hash2") is False
-    assert registry.unchanged("unknown-doc", "hash1") is False
+    assert registry.unchanged(make_document(content_hash_value="hash1")) is True
+    assert registry.unchanged(make_document(content_hash_value="hash2")) is False
+    assert registry.unchanged(make_document(doc_id="unknown-doc")) is False
+
+
+def test_unchanged_is_false_when_only_the_documents_own_fields_differ(tmp_path):
+    # The file is untouched, so the content hash matches -- but domain, source
+    # type and language are the Document's, not the file's, and the run asked
+    # for different ones. Answering "unchanged" would report an ordinary skip
+    # and discard them; domain and source_type reach every Chunk, so the
+    # discarded value is also what retrieval filters on.
+    registry = Registry(tmp_path / "documents.sqlite")
+    registry.upsert(make_document())
+
+    assert registry.unchanged(make_document(domain="os")) is False
+    assert registry.unchanged(make_document(source_type="wiki")) is False
+    assert registry.unchanged(make_document(language="en")) is False
+    # ingested_at is not one of them: comparing it would make every Document
+    # changed once a day, and a run that writes nothing is not an ingestion.
+    assert registry.unchanged(make_document(ingested_at="2026-08-03")) is True
 
 
 def test_list_returns_all_documents(tmp_path):

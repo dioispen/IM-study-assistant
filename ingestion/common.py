@@ -2,6 +2,11 @@
 outside a dot-prefixed directory -- into the Document registry and Chunk store:
 content-hash skip (ADR-0001), structured chunking, batch embedding.
 
+The folder is where the run starts, not what a Document is named by: identity
+is the path below `corpus_root` (config.py's CORPUS_ROOT, which says why).
+Domain, source type and language are the Document's own rather than part of
+that identity, so a run that changes one of them re-ingests the file it names.
+
 Re-running is the routine case, not the exception. An unchanged Document costs
 nothing (no chunking, no embedding); a changed one has its old generation of
 Chunks replaced wholesale; a Document whose text cannot be extracted is
@@ -13,7 +18,7 @@ import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
+from config import CORPUS_ROOT, MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
 from core.chunking import chunk_markdown
 from core.embedder import Embedder
 from core.registry import Document, Registry, content_hash, derive_doc_id
@@ -26,6 +31,16 @@ class ExtractionError(Exception):
     Raised per Document and caught by the run, never propagated out of
     `ingest_folder` -- one unreadable file must not cost the corpus every file
     after it in the walk.
+    """
+
+
+class OutsideCorpusRoot(Exception):
+    """Ingestion was pointed at a folder that does not lie beneath the corpus root.
+
+    Raised for the whole run and before anything is written, unlike
+    ExtractionError: it is not one file that cannot be named but every file the
+    run would touch. Propagated rather than collected into the report, since a
+    report of nothing ingested is the same shape as an empty folder.
     """
 
 
@@ -98,6 +113,27 @@ def _notes_beneath(folder: Path) -> list[tuple[str, Path]]:
     )
 
 
+def _folder_beneath_root(folder: Path, corpus_root: Path) -> Path:
+    """`folder`'s own path below the corpus root, or a loud failure if outside it.
+
+    Both sides are resolved before comparing, so a relative invocation, a `..`
+    segment or a symlinked temp directory still lands against the same root.
+    Only what lies below the root is returned -- nothing absolute, nothing that
+    differs between two machines holding the same corpus, reaches a doc_id.
+    """
+    try:
+        return folder.resolve().relative_to(corpus_root.resolve())
+    except ValueError as error:
+        raise OutsideCorpusRoot(
+            f"{folder} is not beneath the corpus root {corpus_root}. A Document is "
+            "identified by its path below that root, so ingesting from outside it "
+            "would key this run's Documents on paths the next run cannot derive, "
+            "and collide with any same-named note already in the corpus -- whose "
+            "Chunks would then be replaced. Move the notes beneath the root, or "
+            "point CORPUS_ROOT in config.py at the root they already share."
+        ) from error
+
+
 def ingest_folder(
     folder: Path,
     domain: str,
@@ -108,21 +144,31 @@ def ingest_folder(
     language: str = "zh-tw",
     min_tokens: int = MIN_SECTION_TOKENS,
     max_tokens: int = MAX_SECTION_TOKENS,
+    corpus_root: Path = CORPUS_ROOT,
 ) -> IngestReport:
     folder = Path(folder)
+    # Before the walk, so a folder outside the root costs no reading and writes
+    # nothing -- the run fails whole rather than half-ingested under ids that
+    # mean nothing to the next one.
+    beneath_root = _folder_beneath_root(folder, corpus_root)
     ingested: list[str] = []
     skipped: list[str] = []
     failed: list[IngestFailure] = []
 
     for relative, path in _notes_beneath(folder):
-        # Prefixed with domain so that same-named files ingested under
-        # different domains don't collide on doc_id (a plain path relative to
-        # `folder` would drop the domain segment entirely). The subfolder
-        # segments are carried too, so two same-named notes in different
-        # subfolders of one corpus stay two Documents rather than one silently
-        # replacing the other -- and a flat folder's paths, and so its doc_ids,
-        # are exactly what they were before the walk went deeper.
-        source_path = f"{domain}/{relative}"
+        # The path below the corpus root, not below `folder`: identity belongs
+        # to the file, not to how the run was invoked. Two same-named notes in
+        # different folders -- last year's and this year's -- therefore stay two
+        # Documents rather than one silently replacing the other, and pointing
+        # ingestion at a subfolder finds the same doc_ids as pointing it at the
+        # whole corpus.
+        #
+        # `domain` is deliberately not part of it, though it used to be. A
+        # source_path that resolves back to the file cannot carry a segment the
+        # file is not under, and a Document has exactly one Domain anyway -- so
+        # the Domain is a field on it, and changing it re-ingests rather than
+        # forking a second Document off the same file.
+        source_path = (beneath_root / relative).as_posix()
         doc_id = derive_doc_id(source_path)
 
         try:
@@ -174,12 +220,23 @@ def _ingest_document(
     Raises ExtractionError if its text is unusable, having written nothing.
     """
     raw = _extract_text(path)
-    hash_ = content_hash(raw)
+    # Built before the skip check rather than after it, so what is compared
+    # against the registry is exactly what would be written to it -- the
+    # Document cannot be skipped on one set of fields and stored with another.
+    document = Document(
+        doc_id=doc_id,
+        title=_derive_title(path),
+        domain=domain,
+        source_type=source_type,
+        source_path=source_path,
+        language=language,
+        content_hash=content_hash(raw),
+        ingested_at=datetime.date.today().isoformat(),
+    )
 
-    if registry.unchanged(doc_id, hash_):
+    if registry.unchanged(document):
         return False
 
-    title = _derive_title(path)
     drafts = chunk_markdown(raw, min_tokens=min_tokens, max_tokens=max_tokens)
     if not drafts:
         # Structurally readable but empty of prose -- a heading with no body,
@@ -195,25 +252,17 @@ def _ingest_document(
             locator=draft.locator,
             domain=domain,
             source_type=source_type,
-            title=title,
+            title=document.title,
             text=draft.text,
         )
         for draft in drafts
     ]
 
     embeddings = embedder.embed([r.text for r in records])
+    # Before the registry row, so a Document is never recorded as ingested
+    # ahead of the Chunks it is recorded for. Replacing them is also what
+    # carries a changed Domain onto the Chunks retrieval filters on.
     store.replace_document_chunks(doc_id, records, embeddings)
 
-    registry.upsert(
-        Document(
-            doc_id=doc_id,
-            title=title,
-            domain=domain,
-            source_type=source_type,
-            source_path=source_path,
-            language=language,
-            content_hash=hash_,
-            ingested_at=datetime.date.today().isoformat(),
-        )
-    )
+    registry.upsert(document)
     return True

@@ -1,7 +1,9 @@
+import pytest
+
 from core.embedder import FakeEmbedder
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
-from ingestion.common import ingest_folder
+from ingestion.common import OutsideCorpusRoot, ingest_folder
 
 
 class CountingEmbedder:
@@ -28,6 +30,10 @@ def _ingest(folder, domain, registry, store, embedder, **overrides):
         embedder=embedder,
         min_tokens=1,
         max_tokens=10,
+        # The folder's parent, so a corpus laid out one Domain folder per
+        # subdirectory gives each note the `<domain>/<path>` source_path it had
+        # before the root existed. Tests about the root itself pass their own.
+        corpus_root=folder.parent,
     )
     kwargs.update(overrides)
     return ingest_folder(**kwargs)
@@ -40,7 +46,12 @@ def _registry_and_store(tmp_path):
     )
 
 
-def test_same_filename_in_different_domains_gets_distinct_doc_ids(tmp_path):
+def test_notes_in_different_domain_folders_reach_the_registry_under_their_domain(tmp_path):
+    # What separates these two is their path below the corpus root, not the
+    # `domain` argument -- since the root arrived, a Domain is a field on a
+    # Document rather than part of its identity (see the re-home test below).
+    # What this still pins is that each Document lands in the Domain its own
+    # run named, so a corpus grown one Domain folder at a time stays filterable.
     dsa_dir = tmp_path / "notes" / "dsa"
     os_dir = tmp_path / "notes" / "os"
     dsa_dir.mkdir(parents=True)
@@ -121,6 +132,160 @@ def test_same_filename_in_different_subfolders_gets_distinct_doc_ids(tmp_path):
     # back to the file on disk rather than to whichever "overview.md" won.
     assert set(docs) == {"os/排程/overview.md", "os/網路/overview.md"}
     assert len({doc.content_hash for doc in docs.values()}) == 2
+
+
+# The corpus root. Everything above keys a doc_id on the path below the folder
+# ingestion was handed, which makes the id a property of how the run was
+# invoked rather than of the file. These pin it to the path below one
+# configured root instead.
+
+
+def test_two_same_named_notes_under_different_roots_stay_two_documents(tmp_path):
+    # The collision the corpus root exists to prevent: last year's notes and
+    # this year's, kept in separate folders and ingested under one Domain.
+    # Relative to the folder of the moment both derive `os/deadlock.md`, so the
+    # second run replaces the first's registry row and -- through
+    # replace_document_chunks, correctly enforcing ADR-0001's one-generation
+    # invariant -- deletes every Chunk the first had. Nothing warns: the report
+    # calls it an ordinary ingest and a year of notes is gone from the corpus.
+    corpus = tmp_path / "corpus"
+    for year in ("notes-2024", "notes-2025"):
+        (corpus / year / "os").mkdir(parents=True)
+        (corpus / year / "os" / "deadlock.md").write_text(
+            f"# Deadlock\n\nThe {year} note on circular wait.", encoding="utf-8"
+        )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    first = _ingest(
+        corpus / "notes-2024" / "os", "os", registry, store, embedder, corpus_root=corpus
+    )
+    second = _ingest(
+        corpus / "notes-2025" / "os", "os", registry, store, embedder, corpus_root=corpus
+    )
+
+    [first_id], [second_id] = first.ingested, second.ingested
+    assert first_id != second_id
+    # Two live sets of Chunks, not merely two registry rows: the assertion that
+    # says the second year did not take the first year's Chunks with it.
+    assert store.collection.get(where={"doc_id": first_id})["ids"]
+    assert store.collection.get(where={"doc_id": second_id})["ids"]
+    assert {doc.source_path for doc in registry.list()} == {
+        "notes-2024/os/deadlock.md",
+        "notes-2025/os/deadlock.md",
+    }
+
+
+def test_a_doc_id_is_the_same_whichever_folder_beneath_the_root_is_ingested(tmp_path):
+    corpus = tmp_path / "corpus"
+    (corpus / "os" / "排程").mkdir(parents=True)
+    (corpus / "os" / "排程" / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes holding resources.",
+        encoding="utf-8",
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    whole = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    subfolder = _ingest(
+        corpus / "os" / "排程", "os", registry, store, embedder, corpus_root=corpus
+    )
+
+    assert whole.ingested == [derive_doc_id("os/排程/deadlock.md")]
+    # Pointed one folder deeper, the same file on disk is the same Document --
+    # so the second run skips it rather than ingesting a second copy of it.
+    assert subfolder.ingested == []
+    assert subfolder.skipped == whole.ingested
+
+
+def test_the_same_corpus_under_a_different_absolute_root_derives_the_same_doc_ids(tmp_path):
+    # ADR-0001's stability promise holds across machines and checkouts, so no
+    # absolute or machine-specific segment may enter the derivation -- the same
+    # class of concern as reading through read_text so that a CRLF-vs-LF
+    # checkout does not re-embed the corpus.
+    ingested = []
+    for checkout in ("machine-a", "machine-b"):
+        corpus = tmp_path / checkout / "corpus"
+        (corpus / "os").mkdir(parents=True)
+        (corpus / "os" / "deadlock.md").write_text(
+            "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+        )
+        registry, store = _registry_and_store(tmp_path / checkout)
+        report = _ingest(
+            corpus / "os", "os", registry, store, FakeEmbedder(), corpus_root=corpus
+        )
+        ingested.append(report.ingested)
+
+    assert ingested[0] == ingested[1] == [derive_doc_id("os/deadlock.md")]
+
+
+def test_the_registrys_source_path_resolves_back_to_the_file_on_disk(tmp_path):
+    corpus = tmp_path / "corpus"
+    (corpus / "os" / "排程").mkdir(parents=True)
+    (corpus / "os" / "排程" / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+    )
+    registry, store = _registry_and_store(tmp_path)
+
+    _ingest(corpus / "os", "os", registry, store, FakeEmbedder(), corpus_root=corpus)
+
+    [document] = registry.list()
+    assert document.source_path == "os/排程/deadlock.md"
+    # What a citation is followed back through: root plus source_path, and no
+    # segment of it depends on which folder the run happened to be pointed at.
+    assert (corpus / document.source_path).is_file()
+
+
+def test_reingesting_one_note_under_a_different_domain_rehomes_it(tmp_path):
+    # Domain left the doc_id derivation when the corpus root arrived, so one
+    # file is one Document -- and CONTEXT.md gives a Document exactly one
+    # Domain. The second run therefore has to move it rather than report the
+    # ordinary skip its unchanged content would otherwise earn, which would
+    # discard the Domain the run named and leave every Chunk filtered under the
+    # old one.
+    corpus = tmp_path / "corpus"
+    (corpus / "notes").mkdir(parents=True)
+    (corpus / "notes" / "overview.md").write_text(
+        "# Overview\n\nA note filed under the wrong Domain the first time.",
+        encoding="utf-8",
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    first = _ingest(corpus / "notes", "dsa", registry, store, embedder, corpus_root=corpus)
+    second = _ingest(corpus / "notes", "os", registry, store, embedder, corpus_root=corpus)
+
+    [doc_id] = first.ingested
+    assert second.ingested == [doc_id]
+    assert second.skipped == []
+    [document] = registry.list()
+    assert document.domain == "os"
+    # The Chunks moved with it: domain is what retrieval filters on, so a
+    # registry row saying "os" over Chunks still saying "dsa" is no re-homing.
+    chunks = store.collection.get(where={"doc_id": doc_id})
+    assert {m["domain"] for m in chunks["metadatas"]} == {"os"}
+
+
+def test_a_folder_outside_the_corpus_root_fails_loudly(tmp_path):
+    # The alternative is a doc_id derived from a path that means nothing to the
+    # next run and collides with whatever note already sits at it.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere" / "os"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+    )
+    registry, store = _registry_and_store(tmp_path)
+
+    with pytest.raises(OutsideCorpusRoot) as raised:
+        _ingest(elsewhere, "os", registry, store, FakeEmbedder(), corpus_root=corpus)
+
+    # Both paths named, because the reader has to decide which of the two to move.
+    assert str(elsewhere) in str(raised.value)
+    assert str(corpus) in str(raised.value)
+    # Raised for the whole run before anything is written, not per Document.
+    assert registry.list() == []
 
 
 def test_the_report_counts_documents_found_in_subfolders(tmp_path):

@@ -63,9 +63,29 @@ class Registry:
         ).fetchone()
         return Document(*row) if row else None
 
-    def unchanged(self, doc_id: str, content_hash: str) -> bool:
-        existing = self.get(doc_id)
-        return existing is not None and existing.content_hash == content_hash
+    def unchanged(self, document: Document) -> bool:
+        """True if `document` is already recorded exactly as this run would write it.
+
+        Not the content hash alone. Domain, source type and language are the
+        Document's own, not the file's: a re-ingest that changes one of them
+        without touching the file would otherwise be reported as an ordinary
+        skip while quietly discarding what the run asked for -- and domain and
+        source type reach every Chunk, so the discarded value is also what
+        retrieval filters on.
+
+        `ingested_at` is deliberately not compared: a run that writes nothing
+        new is not an ingestion, and comparing it would make every Document
+        changed once a day.
+        """
+        existing = self.get(document.doc_id)
+        if existing is None:
+            return False
+        return (
+            existing.content_hash == document.content_hash
+            and existing.domain == document.domain
+            and existing.source_type == document.source_type
+            and existing.language == document.language
+        )
 
     def list(self) -> list[Document]:
         rows = self._conn.execute(
