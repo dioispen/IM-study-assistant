@@ -86,7 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser = subparsers.add_parser(
         "ingest", help="Ingest a folder of Markdown notes"
     )
-    ingest_parser.add_argument("folder", help="Folder containing .md files")
+    ingest_parser.add_argument(
+        "folder", help="Folder of .md notes, including any in its subfolders"
+    )
     ingest_parser.add_argument("--domain", required=True, choices=DOMAINS)
     ingest_parser.add_argument("--source-type", default="note")
     ingest_parser.add_argument("--language", default=DEFAULT_LANGUAGE)

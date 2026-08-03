@@ -55,6 +55,18 @@ OSI_ID = derive_doc_id("network/osi_model.md")
 ZH_HANDSHAKE_QUESTION = "三向交握的第三個封包由用戶端送出"
 ZH_LAYERING_QUESTION = "應用層之下依序是哪幾層"
 
+# The nested corpus: one Domain folder whose notes sit in subfolders, two of
+# them sharing a filename with a third at the folder's own level.
+NESTED_FIXTURES = FIXTURES / "mis"
+
+MIS_OVERVIEW_ID = derive_doc_id("mis/概述.md")
+DECISION_OVERVIEW_ID = derive_doc_id("mis/決策支援/概述.md")
+PROCESS_OVERVIEW_ID = derive_doc_id("mis/流程管理/概述.md")
+BPMN_ID = derive_doc_id("mis/流程管理/塑模/bpmn.md")
+
+NESTED_IDS = {MIS_OVERVIEW_ID, DECISION_OVERVIEW_ID, PROCESS_OVERVIEW_ID, BPMN_ID}
+ZH_BPMN_QUESTION = "閘道標示流程在此分支或匯流"
+
 
 def _ingest_corpus(tmp_path, fixtures=FIXTURES):
     """The English corpus, and the one the gate tests read distances off.
@@ -460,6 +472,107 @@ def test_a_chinese_document_with_no_prose_is_reported_as_failed(tmp_path):
     assert failure.source_path == "network/empty.md"
     assert "chunk" in failure.reason.lower()
     assert registry.list() == []
+
+
+# Nested corpus. Every fixture folder above is one flat level, which is how
+# ingestion reading only the top level of the folder it was handed survived a
+# green suite: a corpus in subfolders reported "Ingested 0" and the student was
+# told nothing was wrong. These ingest a Domain folder whose notes sit one and
+# two subfolders down, at the thresholds config.py ships. The nesting rules
+# themselves are unit-tested in test_ingest_common.py; what these add is that
+# the corpus on disk really is nested, so the flat-only assumption cannot come
+# back unnoticed.
+
+
+def test_the_doc_ids_of_the_flat_fixture_corpus_survive_the_walk(tmp_path):
+    # Literals rather than derive_doc_id calls, and read off a real ingest
+    # rather than off the hash function: what must hold still is the doc_id
+    # ingestion assigns a note in a flat folder. A doc_id that shifts is a full
+    # re-embed of the corpus for no behavioural reason, and that stability is
+    # what ADR-0001's registry depends on -- so a future change to the walk
+    # fails here rather than silently re-embedding.
+    registry, _store, _embedder, _report = _ingest_with_chinese(tmp_path)
+
+    assert {doc.source_path: doc.doc_id for doc in registry.list()} == {
+        "dsa/binary_search_tree.md": "e90f373100c8",
+        "os/process_scheduling.md": "602b7656a373",
+        "os/deadlock.md": "16812f81788d",
+        "network/tcp_handshake.md": "11093ebca1a8",
+        "network/osi_model.md": "73c926e94948",
+    }
+
+
+def _ingest_nested(tmp_path, fixtures=NESTED_FIXTURES):
+    """The nested corpus, in its own registry and store.
+
+    Kept out of `_ingest_corpus` for the reason `_ingest_with_chinese` gives at
+    length: the gate tests read distances off that store, and Chinese Chunks
+    sized for the configured thresholds fill enough of FakeEmbedder's 64
+    buckets to pull the out-of-corpus trap inside GATE_TAU.
+    """
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    embedder = FakeEmbedder()
+    report = ingest_folder(
+        folder=fixtures,
+        domain="mis",
+        source_type="note",
+        registry=registry,
+        store=store,
+        embedder=embedder,
+    )
+    return registry, store, embedder, report
+
+
+def test_every_note_beneath_the_nested_corpus_is_ingested(tmp_path):
+    # Three of the four are named 概述.md -- one at the folder's own level and
+    # two in subfolders -- so the four distinct doc_ids and four source_paths
+    # are also what says none of them replaced another.
+    registry, _store, _embedder, report = _ingest_nested(tmp_path)
+
+    assert set(report.ingested) == NESTED_IDS
+    assert len(NESTED_IDS) == 4
+    assert {doc.source_path for doc in registry.list()} == {
+        "mis/概述.md",
+        "mis/決策支援/概述.md",
+        "mis/流程管理/概述.md",
+        "mis/流程管理/塑模/bpmn.md",
+    }
+
+
+def test_a_nested_note_is_cited_back_to_its_file_on_disk(tmp_path):
+    # The point of carrying the subfolder segments into source_path: an answer
+    # names a Chunk, and the Document behind it names a path that resolves.
+    registry, store, embedder, _report = _ingest_nested(tmp_path)
+
+    answer = ask(
+        ZH_BPMN_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    [top] = answer.evidence
+    assert top.doc_id == BPMN_ID
+    document = registry.get(BPMN_ID)
+    assert document.source_path == "mis/流程管理/塑模/bpmn.md"
+    # The fixture tree is laid out by Domain, so source_path resolves under it.
+    assert (FIXTURES / document.source_path).is_file()
+
+
+def test_reingesting_the_unchanged_nested_corpus_skips_every_document(tmp_path):
+    # Not the flat skip test over again: the skip keys on a doc_id derived from
+    # the path relative to the folder, so a walk that yielded an absolute path
+    # -- or one relative to something else -- would re-ingest the whole nested
+    # corpus every run while the flat one still skipped.
+    _registry, _store, _embedder, first = _ingest_nested(tmp_path)
+
+    _registry, _store, _embedder, second = _ingest_nested(tmp_path)
+
+    assert second.ingested == []
+    assert sorted(second.skipped) == sorted(first.ingested)
 
 
 def _ask_through_the_gate(question, store, embedder, generator):

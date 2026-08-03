@@ -1,5 +1,6 @@
-"""Ingests a folder of Markdown notes into the Document registry and Chunk
-store: content-hash skip (ADR-0001), structured chunking, batch embedding.
+"""Ingests a folder of Markdown notes -- every one beneath it, at any depth
+outside a dot-prefixed directory -- into the Document registry and Chunk store:
+content-hash skip (ADR-0001), structured chunking, batch embedding.
 
 Re-running is the routine case, not the exception. An unchanged Document costs
 nothing (no chunking, no embedding); a changed one has its old generation of
@@ -24,7 +25,7 @@ class ExtractionError(Exception):
 
     Raised per Document and caught by the run, never propagated out of
     `ingest_folder` -- one unreadable file must not cost the corpus every file
-    after it in the folder.
+    after it in the walk.
     """
 
 
@@ -70,6 +71,33 @@ def _extract_text(path: Path) -> str:
         raise ExtractionError(f"could not be read ({error.strerror or error})") from error
 
 
+def _notes_beneath(folder: Path) -> list[tuple[str, Path]]:
+    """Every Markdown note beneath `folder`, as (path relative to it, path).
+
+    The whole tree, not one flat level: a student's notes live in subfolders,
+    and one that is never read is not a failure anyone sees -- it is a hole in
+    the corpus that surfaces months later as an abstention on a question they
+    know they wrote notes about.
+
+    Dot-prefixed directories are the one exclusion. A note vault keeps
+    `.trash/` and `.obsidian/` beside the notes, and a note the student deleted
+    cited back to them as current is worse than one never ingested. Only
+    directories: a note named `.draft.md` is still a note.
+
+    Sorted on the relative path rather than on Path, so the report reads in the
+    same order everywhere -- Path comparison case-folds on Windows and does not
+    on POSIX.
+    """
+    notes = (
+        (path.relative_to(folder).as_posix(), path) for path in folder.rglob("*.md")
+    )
+    return sorted(
+        (relative, path)
+        for relative, path in notes
+        if not any(segment.startswith(".") for segment in relative.split("/")[:-1])
+    )
+
+
 def ingest_folder(
     folder: Path,
     domain: str,
@@ -86,11 +114,15 @@ def ingest_folder(
     skipped: list[str] = []
     failed: list[IngestFailure] = []
 
-    for path in sorted(folder.glob("*.md")):
+    for relative, path in _notes_beneath(folder):
         # Prefixed with domain so that same-named files ingested under
         # different domains don't collide on doc_id (a plain path relative to
-        # `folder` would drop the domain segment entirely).
-        source_path = f"{domain}/{path.relative_to(folder).as_posix()}"
+        # `folder` would drop the domain segment entirely). The subfolder
+        # segments are carried too, so two same-named notes in different
+        # subfolders of one corpus stay two Documents rather than one silently
+        # replacing the other -- and a flat folder's paths, and so its doc_ids,
+        # are exactly what they were before the walk went deeper.
+        source_path = f"{domain}/{relative}"
         doc_id = derive_doc_id(source_path)
 
         try:
