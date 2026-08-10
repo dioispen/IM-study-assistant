@@ -87,3 +87,26 @@ def test_list_returns_all_documents(tmp_path):
     doc_ids = {doc.doc_id for doc in registry.list()}
 
     assert doc_ids == {"doc1", "doc2"}
+
+
+def test_delete_removes_only_the_named_document(tmp_path):
+    # What retiring a Document that has left the corpus rests on: the row goes,
+    # and the rest of the corpus does not go with it.
+    registry = Registry(tmp_path / "documents.sqlite")
+    registry.upsert(make_document(doc_id="doc1"))
+    registry.upsert(make_document(doc_id="doc2"))
+
+    registry.delete("doc1")
+
+    assert registry.get("doc1") is None
+    assert {doc.doc_id for doc in registry.list()} == {"doc2"}
+
+
+def test_deleting_an_unknown_doc_id_is_not_an_error(tmp_path):
+    # Retirement reads the registry and then writes it; a doc_id that is
+    # already gone is the run having nothing to do, not an incident.
+    registry = Registry(tmp_path / "documents.sqlite")
+
+    registry.delete("never-existed")
+
+    assert registry.list() == []

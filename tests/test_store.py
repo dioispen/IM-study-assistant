@@ -93,3 +93,30 @@ def test_records_from_another_document_are_rejected_rather_than_written(tmp_path
         )
 
     assert store.collection.get()["ids"] == []
+
+
+def test_deleting_a_documents_chunks_leaves_it_holding_none(tmp_path):
+    store = VectorStore(client=make_client(tmp_path))
+    store.replace_document_chunks(
+        "doc1",
+        [make_record("doc1:000", ordinal=0), make_record("doc1:001", ordinal=1)],
+        embeddings=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    )
+
+    store.delete_document_chunks("doc1")
+
+    assert store.collection.get(where={"doc_id": "doc1"})["ids"] == []
+
+
+def test_deleting_one_documents_chunks_leaves_other_documents_alone(tmp_path):
+    store = VectorStore(client=make_client(tmp_path))
+    store.replace_document_chunks(
+        "doc1", [make_record("doc1:000")], embeddings=[[1.0, 0.0, 0.0]]
+    )
+    store.replace_document_chunks(
+        "doc2", [make_record("doc2:000", doc_id="doc2")], embeddings=[[0.0, 1.0, 0.0]]
+    )
+
+    store.delete_document_chunks("doc1")
+
+    assert store.collection.get(where={"doc_id": "doc2"})["ids"] == ["doc2:000"]

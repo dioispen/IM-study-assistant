@@ -9,9 +9,12 @@ that identity, so a run that changes one of them re-ingests the file it names.
 
 Re-running is the routine case, not the exception. An unchanged Document costs
 nothing (no chunking, no embedding); a changed one has its old generation of
-Chunks replaced wholesale; a Document whose text cannot be extracted is
-recorded as failed and the run carries on. Every run returns an IngestReport,
-so a garbled file is a logged incident rather than a silent gap in the corpus.
+Chunks replaced wholesale; a Document the walk no longer finds where it used to
+be is retired, Chunks and registry row together (ADR-0005), which is what keeps
+a moved note one Document rather than two; a Document whose text cannot be
+extracted is recorded as failed and the run carries on. Every run returns an
+IngestReport, so a garbled file is a logged incident rather than a silent gap
+in the corpus, and a retirement is named rather than a silent deletion.
 """
 
 import datetime
@@ -44,6 +47,21 @@ class OutsideCorpusRoot(Exception):
     """
 
 
+class FolderNotFound(Exception):
+    """Ingestion was pointed at a folder that is not there to walk.
+
+    Raised for the whole run, like OutsideCorpusRoot and unlike
+    ExtractionError, because the alternative is catastrophic rather than
+    merely wrong: a walk of a folder that does not exist yields no note, which
+    is byte-for-byte the same evidence as a folder whose notes have all been
+    deleted. Retirement would take that as proof and empty everything beneath
+    it -- so an unmounted vault, a mistyped path or a corpus root that has not
+    finished syncing would delete the corpus and report an ordinary success
+    (ADR-0005). A run has to be able to tell "looked and found nothing" from
+    "could not look".
+    """
+
+
 @dataclass(frozen=True)
 class IngestFailure:
     doc_id: str
@@ -55,15 +73,26 @@ class IngestFailure:
 
 
 @dataclass(frozen=True)
+class RetiredDocument:
+    doc_id: str
+    source_path: str
+
+    def notice(self) -> str:
+        return f"Retired {self.source_path} — no longer in the corpus at that path"
+
+
+@dataclass(frozen=True)
 class IngestReport:
     ingested: list[str]
     skipped: list[str]
     failed: list[IngestFailure]
+    retired: list[RetiredDocument]
 
     def summary(self) -> str:
         return (
             f"Ingested {len(self.ingested)}, "
             f"skipped {len(self.skipped)} unchanged, "
+            f"retired {len(self.retired)}, "
             f"failed {len(self.failed)}."
         )
 
@@ -134,6 +163,61 @@ def _folder_beneath_root(folder: Path, corpus_root: Path) -> Path:
         ) from error
 
 
+def _walked_prefix(beneath_root: Path) -> str:
+    """The source_path prefix covering exactly what a walk of this folder sees.
+
+    Empty for the corpus root itself, which covers the whole corpus; otherwise
+    the folder's own path below the root, with a trailing slash so that `os/`
+    covers `os/deadlock.md` and not the sibling folder `os-2024/deadlock.md`.
+    """
+    return "".join(f"{segment}/" for segment in beneath_root.parts)
+
+
+def _retire_absent_documents(
+    walked_prefix: str, found: set[str], registry: Registry, store: VectorStore
+) -> list[RetiredDocument]:
+    """Retire the Documents beneath `walked_prefix` that the walk did not find.
+
+    A Document is retired on the evidence that the walk covering its
+    source_path did not reach it: within that prefix the walk is exhaustive, so
+    absence from it means the note is not there any more -- deleted, moved
+    elsewhere, or moved into a dot-prefixed directory, which is what deleting a
+    note in a vault does. Outside the prefix the run has seen nothing and so
+    says nothing, which is why ingesting one subfolder cannot empty the corpus.
+
+    The cost of that scoping: a note moved out of the walked folder entirely is
+    ingested at its new path while the old Document survives until a run that
+    covers both -- pointing ingestion at the corpus root, or at their common
+    ancestor, retires it.
+
+    Chunks go first and the registry row second, so that a run interrupted
+    between the two leaves a Document whose Chunks are gone -- which the next
+    run over the same folder retires again, retirement being idempotent. The
+    other order leaves the Chunks with no registry row naming them, and since
+    retirement reads the registry to find its candidates, no later run could
+    ever reach them: exactly the undetectable stale generation ADR-0001 exists
+    to prevent (ADR-0005).
+    """
+    absent = sorted(
+        (
+            document
+            for document in registry.list()
+            if document.source_path.startswith(walked_prefix)
+            and document.doc_id not in found
+        ),
+        key=lambda document: document.source_path,
+    )
+
+    for document in absent:
+        store.delete_document_chunks(document.doc_id)
+        registry.delete(document.doc_id)
+
+    return [
+        RetiredDocument(doc_id=document.doc_id, source_path=document.source_path)
+        for document in absent
+    ]
+
+
 def ingest_folder(
     folder: Path,
     domain: str,
@@ -147,6 +231,15 @@ def ingest_folder(
     corpus_root: Path = CORPUS_ROOT,
 ) -> IngestReport:
     folder = Path(folder)
+    if not folder.is_dir():
+        raise FolderNotFound(
+            f"{folder} is not a folder that can be walked. Ingestion retires the "
+            "Documents beneath the folder it walks that the walk does not find, "
+            "and a folder that is not there yields the same empty walk as one "
+            "whose notes are all gone -- so continuing would retire every "
+            "Document beneath it. Check the path, or that the corpus has finished "
+            "syncing."
+        )
     # Before the walk, so a folder outside the root costs no reading and writes
     # nothing -- the run fails whole rather than half-ingested under ids that
     # mean nothing to the next one.
@@ -154,6 +247,7 @@ def ingest_folder(
     ingested: list[str] = []
     skipped: list[str] = []
     failed: list[IngestFailure] = []
+    found: set[str] = set()
 
     for relative, path in _notes_beneath(folder):
         # The path below the corpus root, not below `folder`: identity belongs
@@ -170,6 +264,12 @@ def ingest_folder(
         # forking a second Document off the same file.
         source_path = (beneath_root / relative).as_posix()
         doc_id = derive_doc_id(source_path)
+        # Recorded before the outcome is known, so that a Document whose text
+        # this run could not extract counts as found rather than as gone. It
+        # keeps whatever generation of Chunks it last had (see below), and
+        # retiring it on top of that would let one unreadable file delete the
+        # note it is the only remaining copy of.
+        found.add(doc_id)
 
         try:
             was_ingested = _ingest_document(
@@ -198,7 +298,14 @@ def ingest_folder(
                 IngestFailure(doc_id=doc_id, source_path=source_path, reason=str(error))
             )
 
-    return IngestReport(ingested=ingested, skipped=skipped, failed=failed)
+    # After the walk, not before it: what retires a Document is that this run
+    # looked where it should have been and did not find it.
+    retired = _retire_absent_documents(
+        _walked_prefix(beneath_root), found, registry, store
+    )
+    return IngestReport(
+        ingested=ingested, skipped=skipped, failed=failed, retired=retired
+    )
 
 
 def _ingest_document(

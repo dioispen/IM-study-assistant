@@ -3,7 +3,7 @@ import pytest
 from core.embedder import FakeEmbedder
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
-from ingestion.common import OutsideCorpusRoot, ingest_folder
+from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
 
 
 class CountingEmbedder:
@@ -236,6 +236,226 @@ def test_the_registrys_source_path_resolves_back_to_the_file_on_disk(tmp_path):
     assert (corpus / document.source_path).is_file()
 
 
+# Retirement. A path-derived doc_id makes a moved note a new Document, so
+# without these the note at the old path lingers in the registry with every
+# Chunk it had still retrievable -- two copies of the same prose to draw
+# Evidence from, one of them citing a source_path that no longer resolves.
+
+
+def test_a_note_that_moves_within_the_corpus_stays_one_document(tmp_path):
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    note = corpus / "os" / "deadlock.md"
+    note.write_text(
+        "# Deadlock\n\nCircular wait among processes holding resources.",
+        encoding="utf-8",
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    (corpus / "os" / "排程").mkdir()
+    note.rename(corpus / "os" / "排程" / "deadlock.md")
+    report = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    assert report.ingested == [derive_doc_id("os/排程/deadlock.md")]
+    # One Document, not the moved one beside the ghost of where it used to be.
+    assert [doc.source_path for doc in registry.list()] == ["os/排程/deadlock.md"]
+    assert [retired.source_path for retired in report.retired] == ["os/deadlock.md"]
+
+
+def test_the_chunks_of_a_moved_notes_old_path_are_no_longer_retrievable(tmp_path):
+    # The registry row is the bookkeeping; this is the failure a reader meets.
+    # Left behind, the old generation is a second copy of the same prose for
+    # retrieval to draw Evidence from, citing a source_path that no longer
+    # resolves to a file -- the traceability failure the corpus root was
+    # introduced to close, arriving by a different route.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    note = corpus / "os" / "deadlock.md"
+    note.write_text(
+        "# Deadlock\n\nCircular wait among processes holding resources.",
+        encoding="utf-8",
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    (corpus / "os" / "排程").mkdir()
+    note.rename(corpus / "os" / "排程" / "deadlock.md")
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    [embedding] = embedder.embed(["Circular wait among processes holding resources."])
+    retrieved = store.query(embedding, top_k=5)
+    assert retrieved  # the moved Document is still answerable, exactly once
+    assert {chunk.doc_id for chunk in retrieved} == {
+        derive_doc_id("os/排程/deadlock.md")
+    }
+
+
+def test_ingesting_one_subfolder_retires_no_document_outside_it(tmp_path):
+    # The rule that keeps retirement from being catastrophic. A run pointed at
+    # one folder sees almost nothing of the corpus, so "absent from this walk"
+    # is only evidence of absence for what the walk covered -- read the other
+    # way, the first run anyone makes on a single folder empties the corpus.
+    corpus = tmp_path / "corpus"
+    (corpus / "os" / "排程").mkdir(parents=True)
+    (corpus / "dsa").mkdir()
+    (corpus / "os" / "排程" / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+    )
+    (corpus / "dsa" / "bst.md").write_text(
+        "# BST\n\nKeys smaller than the node go left.", encoding="utf-8"
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    report = _ingest(
+        corpus / "os" / "排程", "os", registry, store, embedder, corpus_root=corpus
+    )
+
+    assert report.retired == []
+    assert {doc.source_path for doc in registry.list()} == {
+        "os/排程/deadlock.md",
+        "dsa/bst.md",
+    }
+    # Not merely the registry: the Chunks a question would draw Evidence from.
+    assert store.collection.get(where={"doc_id": derive_doc_id("dsa/bst.md")})["ids"]
+
+
+def test_a_note_moved_into_a_dot_prefixed_directory_is_retired(tmp_path):
+    # What deleting a note in a vault actually does: it moves the file into
+    # `.trash/`, which the walk already declines to read. Without retirement the
+    # note stays fully answerable and cites a path the student cannot open.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    (corpus / ".trash").mkdir()
+    note = corpus / "os" / "deadlock.md"
+    note.write_text("# Deadlock\n\nCircular wait among processes.", encoding="utf-8")
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    note.rename(corpus / ".trash" / "deadlock.md")
+    report = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    assert [retired.source_path for retired in report.retired] == ["os/deadlock.md"]
+    assert registry.list() == []
+    assert store.collection.get()["ids"] == []
+
+
+def test_a_document_that_fails_extraction_is_not_retired(tmp_path):
+    # Found and unreadable is not gone. Retiring on a failed extraction would
+    # let one locked or garbled file delete the Chunks that are, until it can
+    # be read again, the only copy of that note the corpus has -- and the run
+    # already declines to clear them for the same reason.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    note = corpus / "os" / "deadlock.md"
+    note.write_text("# Deadlock\n\nCircular wait among processes.", encoding="utf-8")
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    note.write_bytes(b"# Deadlock\n\n\xff\xfe not decodable")
+    report = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    assert report.retired == []
+    assert [failure.source_path for failure in report.failed] == ["os/deadlock.md"]
+    assert [doc.source_path for doc in registry.list()] == ["os/deadlock.md"]
+    assert store.collection.get(where={"doc_id": derive_doc_id("os/deadlock.md")})["ids"]
+
+
+def test_a_folder_that_does_not_exist_fails_loudly_and_retires_nothing(tmp_path):
+    # The way retirement could empty the corpus. A walk of a folder that is not
+    # there yields no note, which is indistinguishable from a folder whose
+    # notes are all gone -- so pointed at an unmounted vault, a mistyped path or
+    # a corpus root that has not synced, one run would retire every Document
+    # beneath it and report it as an ordinary success. The run has to be able
+    # to tell "looked and found nothing" from "could not look".
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    (corpus / "os" / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    with pytest.raises(FolderNotFound) as raised:
+        _ingest(
+            corpus / "not-synced", "os", registry, store, embedder, corpus_root=corpus
+        )
+
+    assert str(corpus / "not-synced") in str(raised.value)
+    assert [doc.source_path for doc in registry.list()] == ["os/deadlock.md"]
+    assert store.collection.get(where={"doc_id": derive_doc_id("os/deadlock.md")})["ids"]
+
+
+def test_a_sibling_folder_sharing_a_name_prefix_is_not_retired(tmp_path):
+    # `os/` covers `os/deadlock.md` and must not reach into `os-2024/`, which a
+    # prefix match without the separator would swallow whole -- the run would
+    # retire a year of notes it never looked at.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    (corpus / "os-2024").mkdir()
+    (corpus / "os" / "deadlock.md").write_text(
+        "# Deadlock\n\nCircular wait among processes.", encoding="utf-8"
+    )
+    (corpus / "os-2024" / "deadlock.md").write_text(
+        "# Deadlock\n\nLast year's note on circular wait.", encoding="utf-8"
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    report = _ingest(
+        corpus / "os", "os", registry, store, embedder, corpus_root=corpus
+    )
+
+    assert report.retired == []
+    assert {doc.source_path for doc in registry.list()} == {
+        "os/deadlock.md",
+        "os-2024/deadlock.md",
+    }
+
+
+def test_the_report_names_every_document_it_retired(tmp_path):
+    # Retirement deletes Chunks, so it is the one outcome of a run that costs
+    # the student something they cannot get back by re-running. Counted in the
+    # summary even at zero, for the reason failures are, and named by
+    # source_path rather than doc_id -- a retired Document is no longer in the
+    # registry to look its id up in.
+    corpus = tmp_path / "corpus"
+    (corpus / "os").mkdir(parents=True)
+    for name in ("deadlock.md", "排程.md"):
+        (corpus / "os" / name).write_text(
+            f"# {name}\n\nA note about {name}.", encoding="utf-8"
+        )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = FakeEmbedder()
+
+    first = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+    (corpus / "os" / "deadlock.md").unlink()
+    (corpus / "os" / "排程.md").unlink()
+    report = _ingest(corpus, "os", registry, store, embedder, corpus_root=corpus)
+
+    assert first.retired == []
+    assert first.summary() == "Ingested 2, skipped 0 unchanged, retired 0, failed 0."
+    # Sorted on source_path: registry.list() has no order of its own, and a
+    # report of what was deleted has to read the same way twice.
+    assert [retired.source_path for retired in report.retired] == [
+        "os/deadlock.md",
+        "os/排程.md",
+    ]
+    assert report.summary() == "Ingested 0, skipped 0 unchanged, retired 2, failed 0."
+    assert report.retired[0].notice() == (
+        "Retired os/deadlock.md — no longer in the corpus at that path"
+    )
+
+
 def test_reingesting_one_note_under_a_different_domain_rehomes_it(tmp_path):
     # Domain left the doc_id derivation when the corpus root arrived, so one
     # file is one Document -- and CONTEXT.md gives a Document exactly one
@@ -311,7 +531,7 @@ def test_the_report_counts_documents_found_in_subfolders(tmp_path):
     assert report.skipped == [derive_doc_id("os/排程/kept.md")]
     [failure] = report.failed
     assert failure.source_path == "os/排程/garbled.md"
-    assert report.summary() == "Ingested 1, skipped 1 unchanged, failed 1."
+    assert report.summary() == "Ingested 1, skipped 1 unchanged, retired 0, failed 1."
 
 
 def test_notes_under_a_dot_prefixed_directory_are_left_alone(tmp_path):
@@ -487,4 +707,4 @@ def test_the_report_counts_ingested_skipped_and_failed(tmp_path):
     report = _ingest(folder, "dsa", registry, store, embedder)
 
     assert (len(report.ingested), len(report.skipped), len(report.failed)) == (1, 1, 1)
-    assert report.summary() == "Ingested 1, skipped 1 unchanged, failed 1."
+    assert report.summary() == "Ingested 1, skipped 1 unchanged, retired 0, failed 1."

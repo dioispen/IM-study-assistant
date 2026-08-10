@@ -73,7 +73,7 @@ class VectorStore:
                 "would be written without their own generation being cleared."
             )
 
-        self.collection.delete(where={"doc_id": doc_id})
+        self.delete_document_chunks(doc_id)
         self.collection.upsert(
             ids=[r.chunk_id for r in records],
             embeddings=embeddings,
@@ -90,6 +90,18 @@ class VectorStore:
                 for r in records
             ],
         )
+
+    def delete_document_chunks(self, doc_id: str) -> None:
+        """Leave the collection holding no Chunk of `doc_id` at all.
+
+        The other half of `replace_document_chunks`, which is written in terms
+        of it: replacing a generation is this plus writing the next one, and
+        retiring a Document that has left the corpus is this on its own. It is
+        a method rather than `replace_document_chunks(doc_id, [], [])` because
+        that call cannot be made -- the collection rejects an upsert of no ids,
+        so "replace with nothing" would read as a supported argument and fail.
+        """
+        self.collection.delete(where={"doc_id": doc_id})
 
     def query(self, embedding: list[float], top_k: int) -> list[RetrievedChunk]:
         result = self.collection.query(query_embeddings=[embedding], n_results=top_k)

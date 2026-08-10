@@ -63,6 +63,18 @@ class Registry:
         ).fetchone()
         return Document(*row) if row else None
 
+    def delete(self, doc_id: str) -> None:
+        """Remove a Document's row, for a Document that has left the corpus.
+
+        Deleted after the Document's Chunks, never before them: the row is what
+        a later run finds the Document by, so while it is there the retirement
+        can always be finished. Dropping it first would leave Chunks that
+        nothing in the registry names and no run could find again -- the
+        undetectable stale generation ADR-0001 exists to prevent (ADR-0005).
+        """
+        self._conn.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
+        self._conn.commit()
+
     def unchanged(self, document: Document) -> bool:
         """True if `document` is already recorded exactly as this run would write it.
 

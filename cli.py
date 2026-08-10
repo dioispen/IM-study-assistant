@@ -21,7 +21,7 @@ from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.registry import Registry
 from core.store import VectorStore
-from ingestion.common import OutsideCorpusRoot, ingest_folder
+from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -39,15 +39,24 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             embedder=embedder,
             language=args.language,
         )
-    except OutsideCorpusRoot as error:
-        # A mistyped folder is the likeliest way to reach this, and the message
-        # already says what to do about it -- so it reads as an error rather
-        # than as a traceback the reader has to interpret. Raised before the
-        # walk, so no Document was read and no Chunk written.
+    except (FolderNotFound, OutsideCorpusRoot) as error:
+        # A mistyped folder is the likeliest way to reach either, and both
+        # messages already say what to do about it -- so it reads as an error
+        # rather than as a traceback the reader has to interpret. Raised before
+        # the walk, so no Document was read, no Chunk written and nothing
+        # retired.
         print(f"ERROR: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
     print(report.summary())
+    # Retirements are named one by one rather than only counted. A run that
+    # deletes Chunks is the one outcome the reader cannot undo by re-running,
+    # and when it is a surprise -- a folder moved out of the corpus root, a
+    # vault half-synced -- the source_path is what tells them which notes to
+    # put back. Not a warning: reorganising notes is the ordinary case, and the
+    # retirement is exactly what was asked for.
+    for retired in report.retired:
+        print(retired.notice())
     # Failures go to stderr and name the file: a garbled note is a run the
     # reader has to act on, not a silent gap in the corpus.
     for failure in report.failed:

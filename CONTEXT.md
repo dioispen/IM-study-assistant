@@ -30,6 +30,12 @@ diversity limits are applied. Everything the answer may rest on, and the only
 thing its citations may point at.
 _Avoid_: context, passages, results, hits
 
+**Retirement**:
+A Document leaving the corpus, because an ingestion run looked where it was and
+did not find it — deleted, moved, or moved out of reach. Takes its Chunks with
+it, and is named in the run's report rather than done silently.
+_Avoid_: removal, purge, cleanup, tombstone
+
 ## Evaluation
 
 **Gold Document**:
