@@ -206,7 +206,9 @@ mis-rag/
 
 ### 第 3 週:Ingestion — 筆記進場
 - [ ] 確定 P1 領域(建議 `intro-cs` + `dsa`)
-- [ ] 完成筆記 ingestion(md 優先;docx / PDF 視手上檔案而定)
+- [ ] 完成筆記 ingestion:**md 與 docx**——兩者都有標題,走結構化路徑
+  - PDF 筆記沒有標題可切,得靠固定長度 + 重疊,所以**跟著非結構化路徑一起延後**(§五)。
+    這不是「PDF 不重要」,而是主線這八週不開第二條 chunking 路徑
 - [ ] 人工抽查抽取品質,記錄問題(斷行、亂碼、雜訊)
 - [ ] 定案 metadata schema。**欄位一次到位、只實作一種來源**:`source_type` 保持開放式列舉、
       `locator` 保持「文件中的哪裡」而不是「標題路徑」,日後補 wiki / 文章 / 論文時才不必動 schema、
@@ -218,7 +220,7 @@ mis-rag/
       過大的段落切成多段但共用同一個 locator
   - 非結構化路徑(固定長度 + 重疊)沒有輸入,**隨 §五 一起延後**。分流的位置(依 `source_type`)
     現在就留著,補的時候是加一條分支而不是改結構
-- [ ] 產生 locator:筆記是標題路徑
+- [ ] 產生 locator:筆記(md / docx)是標題路徑
 - [ ] 建立 Document registry,實作「content_hash 沒變就整份跳過」
 - [ ] 批次 embedding 並寫入 ChromaDB(**建 collection 時記得 `hnsw:space="cosine"`**)
 - [ ] 實作 metadata 過濾檢索(依領域;`source_type` 欄位照樣寫入,只是現在只有一個值)
@@ -305,7 +307,8 @@ mis-rag/
 | 項目 | 原本排在 | 為什麼一起走 |
 |---|---|---|
 | `ingest_wiki.py` / `ingest_articles.py` / `ingest_papers.py` | 第 3 週 | 三支腳本本身 |
-| 非結構化 chunking(固定長度 + 重疊) | 第 4 週 | 只有論文/文章會走這條路,沒有來源就沒有輸入 |
+| 非結構化 chunking(固定長度 + 重疊) | 第 4 週 | 論文、文章、**PDF 筆記**都走這條路 |
+| PDF 筆記 | 第 3 週 | 沒有標題可切,只能走非結構化路徑——跟著路徑走,不跟著「筆記」走 |
 | 評測的「跨來源題 6 題」 | 第 5 週 | 只有一種 `source_type` 時題目不成立 |
 | `window` / `overlap` 參數掃描 | 第 5 週 | 掃的是非結構化路徑的參數 |
 | 衝突偵測 | 第 6 週(舊) | 「不同來源說法不一致」需要第二種來源才比得出來 |
