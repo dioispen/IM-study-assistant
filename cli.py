@@ -13,6 +13,7 @@ from config import (
     DOMAINS,
     EMBEDDING_MODEL,
     GENERATION_MODEL,
+    MAX_CHUNKS_PER_DOCUMENT,
     REGISTRY_PATH,
     TOP_K,
 )
@@ -20,8 +21,41 @@ from core.ask import ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.registry import Registry
-from core.store import VectorStore
+from core.store import ChunkFilter, RetrievedChunk, VectorStore
 from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
+
+
+NO_CAP = "off"
+
+
+def cap_argument(value: str) -> int | None:
+    """`--max-per-document` as the cap `ask` takes: a positive int, or None.
+
+    A parser-level type rather than a check inside cmd_ask, so a bad value is
+    refused before a store is opened or a key is needed, and named on the usage
+    line the reader is already looking at.
+
+    "off" exists because no number means no cap: zero admits nothing and every
+    question would abstain as though the corpus were empty. Uncapped retrieval
+    is the baseline the Week 7 diversity experiment reads the cap against
+    (PLAN.md §第 7 週), so it needs to be reachable from the command line
+    without editing config.py.
+    """
+    if value == NO_CAP:
+        return None
+    try:
+        cap = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is neither a whole number nor {NO_CAP!r}"
+        ) from None
+    if cap < 1:
+        raise argparse.ArgumentTypeError(
+            f"a cap of {cap} admits no Chunk into the Evidence, so every question "
+            f"would abstain as though the corpus were empty; pass at least 1, or "
+            f"{NO_CAP!r} for no cap"
+        )
+    return cap
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
@@ -63,6 +97,32 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(failure.warning(), file=sys.stderr)
 
 
+def source_card(chunk: RetrievedChunk) -> str:
+    """One Evidence Chunk as the line a reader follows back to the note.
+
+    One card per Chunk of the Evidence and none besides, which is what makes
+    the cards report the answer's real footing: a question scoped to one Domain
+    or capped per Document has fewer Chunks to show, and showing anything the
+    Evidence does not hold would credit the answer to a Document generation was
+    never given (CONTEXT.md: Evidence is the only thing an answer's citations
+    may point at).
+    """
+    return f"- {chunk.title} ({chunk.source_type}) — {chunk.locator}"
+
+
+def describe_filter(chunk_filter: ChunkFilter) -> str:
+    """The restriction in the reader's words, for a message that has to say
+    what the question was narrowed to."""
+    return ", ".join(
+        f"{label} {value}"
+        for label, value in (
+            ("domain", chunk_filter.domain),
+            ("source type", chunk_filter.source_type),
+        )
+        if value is not None
+    )
+
+
 def cmd_ask(args: argparse.Namespace) -> None:
     # Asserted before the store is opened or a key is needed: a tau belonging
     # to another embedding model is a misconfiguration, not a bad answer.
@@ -72,6 +132,8 @@ def cmd_ask(args: argparse.Namespace) -> None:
     embedder = OpenAIEmbedder(model=EMBEDDING_MODEL)
     generator = OpenAIGenerator(model=GENERATION_MODEL)
 
+    chunk_filter = ChunkFilter(domain=args.domain, source_type=args.source_type)
+
     answer = ask(
         args.question,
         embedder,
@@ -79,10 +141,20 @@ def cmd_ask(args: argparse.Namespace) -> None:
         generator,
         top_k=args.top_k,
         distance_threshold=threshold,
+        chunk_filter=chunk_filter,
+        max_chunks_per_document=args.max_per_document,
     )
 
     print(answer.text)
     if answer.abstained:
+        # A scoped question abstains on the corpus it was scoped to, and the
+        # abstention text speaks of "the corpus" -- so the restriction is named
+        # here rather than leaving the reader to read it as "your notes do not
+        # cover this" when the truth may be "not under that Domain".
+        restriction = describe_filter(chunk_filter)
+        if restriction:
+            print()
+            print(f"(The question was restricted to {restriction}.)")
         # An abstention is the one moment an underived tau visibly costs the
         # reader an answer, so that is where it admits it is underived.
         if DISTANCE_THRESHOLD.provisional:
@@ -97,7 +169,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
     print()
     print("Sources:")
     for chunk in answer.evidence:
-        print(f"- {chunk.title} ({chunk.source_type}) — {chunk.locator}")
+        print(source_card(chunk))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -124,6 +196,32 @@ def build_parser() -> argparse.ArgumentParser:
     ask_parser = subparsers.add_parser("ask", help="Ask a question")
     ask_parser.add_argument("question")
     ask_parser.add_argument("--top-k", type=int, default=TOP_K)
+    # The scope of the question. Constrained to DOMAINS for the reason ingest
+    # is: a Domain that does not exist matches no Chunk, and the resulting
+    # abstention is indistinguishable from a corpus that genuinely covers
+    # nothing -- so a typo would read as an answer about the corpus. Source
+    # type takes no choices because it is an open set (CONTEXT.md) with no list
+    # to check against.
+    ask_parser.add_argument(
+        "--domain", choices=DOMAINS, help="Restrict the question to one Domain"
+    )
+    ask_parser.add_argument(
+        "--source-type", help="Restrict the question to one Source type"
+    )
+    # Unlike --distance-threshold, this one exists: the cap is a diversity
+    # preference to be swept in Week 7, not a calibrated constant paired with an
+    # embedding model, and turning it off for one question is how the sweep
+    # reads the baseline.
+    ask_parser.add_argument(
+        "--max-per-document",
+        type=cap_argument,
+        default=MAX_CHUNKS_PER_DOCUMENT,
+        metavar=f"{{N,{NO_CAP}}}",
+        help=(
+            "Most Chunks one Document may contribute to the Evidence, "
+            f"or {NO_CAP!r} for no cap"
+        ),
+    )
     # No --distance-threshold override: ADR-0003 has tau swept and read off by
     # a stated rule, never hand-tuned per invocation, and a per-call float
     # would slip past the embedding-model pairing that DistanceThreshold exists

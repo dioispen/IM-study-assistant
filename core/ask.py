@@ -11,7 +11,7 @@ from core.embedder import Embedder
 from core.gate import ABSTENTION_TEXT, should_abstain
 from core.generator import Generator, build_prompt
 from core.retriever import retrieve
-from core.store import RetrievedChunk, VectorStore
+from core.store import ChunkFilter, RetrievedChunk, VectorStore
 
 
 @dataclass(frozen=True)
@@ -28,8 +28,17 @@ def ask(
     generator: Generator,
     top_k: int,
     distance_threshold: float,
+    chunk_filter: ChunkFilter | None = None,
+    max_chunks_per_document: int | None = None,
 ) -> Answer:
-    evidence = retrieve(question, embedder, store, top_k=top_k)
+    evidence = retrieve(
+        question,
+        embedder,
+        store,
+        top_k=top_k,
+        chunk_filter=chunk_filter,
+        max_chunks_per_document=max_chunks_per_document,
+    )
 
     if should_abstain(evidence, distance_threshold):
         # Evidence is what generation was given (CONTEXT.md), and the only

@@ -37,6 +37,61 @@ class RetrievedChunk:
     distance: float
 
 
+@dataclass(frozen=True)
+class ChunkFilter:
+    """A restriction on which Chunks a question may retrieve at all.
+
+    Both axes are the ones denormalized onto every Chunk at ingestion, which is
+    what lets the restriction be applied inside the query rather than to its
+    results. That distinction is the whole design: applied afterwards, "only my
+    dsa notes" would return however many of the nearest `top_k` Chunks happened
+    to be dsa notes -- usually far fewer than were asked for, and fewer the more
+    selective the restriction, which is exactly backwards.
+
+    A field left None is not a restriction, so `ChunkFilter()` is the unfiltered
+    question and needs no separate representation. The two combine by
+    conjunction: `ChunkFilter(domain="dsa", source_type="note")` is "my own DSA
+    notes", not "anything dsa or anything of mine".
+
+    Source type is an open set (CONTEXT.md), so nothing here checks the value
+    against a list; the corpus carries one value today and a filter naming
+    another simply matches nothing. Domain is a closed one, but the check
+    belongs where a typo is made -- cli.py constrains --domain to DOMAINS.
+    """
+
+    domain: str | None = None
+    source_type: str | None = None
+
+
+def _where_clause(chunk_filter: ChunkFilter | None) -> dict | None:
+    """`chunk_filter` as Chroma's metadata predicate, or None for no filtering.
+
+    Chroma takes a bare `{field: value}` for one condition and requires an
+    explicit `$and` for two, and takes None -- not `{}` -- to mean unfiltered.
+    Kept private, and kept here rather than on ChunkFilter, so that dialect
+    stays inside the one module that already speaks it: ChunkFilter is then a
+    value the CLI and the ask seam can pass around without either of them
+    knowing the collection is a Chroma one.
+    """
+    if chunk_filter is None:
+        return None
+
+    conditions = [
+        {field: value}
+        for field, value in (
+            ("domain", chunk_filter.domain),
+            ("source_type", chunk_filter.source_type),
+        )
+        if value is not None
+    ]
+
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
 class VectorStore:
     def __init__(self, path=CHROMA_PATH, collection_name: str = CHUNK_COLLECTION_NAME, client=None):
         self._client = client or chromadb.PersistentClient(path=str(path))
@@ -103,8 +158,24 @@ class VectorStore:
         """
         self.collection.delete(where={"doc_id": doc_id})
 
-    def query(self, embedding: list[float], top_k: int) -> list[RetrievedChunk]:
-        result = self.collection.query(query_embeddings=[embedding], n_results=top_k)
+    def query(
+        self,
+        embedding: list[float],
+        top_k: int,
+        chunk_filter: ChunkFilter | None = None,
+    ) -> list[RetrievedChunk]:
+        """The `top_k` Chunks nearest `embedding` that satisfy `chunk_filter`.
+
+        Returned nearest-first, which every caller relies on: the gate reads the
+        nearest distance off the front, and the per-Document cap in
+        core/retriever.py keeps each Document's nearest Chunks by walking the
+        list in order.
+        """
+        result = self.collection.query(
+            query_embeddings=[embedding],
+            n_results=top_k,
+            where=_where_clause(chunk_filter),
+        )
         ids = result["ids"][0]
         documents = result["documents"][0]
         metadatas = result["metadatas"][0]

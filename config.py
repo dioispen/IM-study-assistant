@@ -57,6 +57,20 @@ GENERATION_MODEL = "gpt-4o-mini"
 
 TOP_K = 5
 
+# The most Chunks any single Document may contribute to one question's Evidence
+# -- the diversity limit CONTEXT.md's definition of Evidence already allows for.
+# Without it a long, well-matched note fills every one of the TOP_K slots with
+# five spans of the same section, which spends the whole context window to say
+# one thing and hides every other Document that could have answered.
+#
+# Two rather than one: a Chunk is a section-sized span, so a question whose
+# answer runs across two sections of one note still has both, while nothing
+# short of three Documents can fill five slots. The number is due to be swept
+# against Recall@k with the Week 5 instruments before it is trusted (PLAN.md
+# §第 7 週, "來源多樣性"), alongside MMR as the richer alternative -- this is the
+# simple cap that experiment measures against, not its conclusion.
+MAX_CHUNKS_PER_DOCUMENT = 2
+
 
 @dataclass(frozen=True)
 class DistanceThreshold:
