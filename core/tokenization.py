@@ -2,7 +2,7 @@
 
 A placeholder measure, not a real tokenizer: one CJK codepoint is one token,
 and a run of non-CJK word characters is one token. Picking a real tokenizer is
-deferred to Week 5 tuning (PLAN.md), together with the threshold sweep that
+deferred to Week 6 tuning (PLAN.md), together with the threshold sweep that
 choice would invalidate.
 
 The heuristic is chosen so that the section thresholds in config.py keep

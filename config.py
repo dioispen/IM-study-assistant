@@ -48,7 +48,7 @@ CORPUS_ROOT = DATA_DIR / "corpus"
 # non-CJK word characters is one token. That heuristic is a placeholder --
 # close enough to a real tokenizer in both languages for these numbers to
 # mean roughly the same thing in each -- until a real tokenizer is picked
-# (deferred to Week 5 tuning per PLAN.md).
+# (deferred to Week 6 tuning per PLAN.md).
 MIN_SECTION_TOKENS = 40
 MAX_SECTION_TOKENS = 300
 
@@ -66,7 +66,7 @@ TOP_K = 5
 # Two rather than one: a Chunk is a section-sized span, so a question whose
 # answer runs across two sections of one note still has both, while nothing
 # short of three Documents can fill five slots. The number is due to be swept
-# against Recall@k with the Week 5 instruments before it is trusted (PLAN.md
+# against Recall@k with the Week 6 instruments before it is trusted (PLAN.md
 # §第 7 週, "來源多樣性"), alongside MMR as the richer alternative -- this is the
 # simple cap that experiment measures against, not its conclusion.
 MAX_CHUNKS_PER_DOCUMENT = 2
@@ -98,12 +98,19 @@ class DistanceThreshold:
 
 
 # Abstention layer 1 of ADR-0003. PROVISIONAL: not derived, hand-picked to be
-# permissive until the Week 5 sweep reads the real value off the eval set (the
+# permissive until the Week 6 sweep reads the real value off the eval set (the
 # largest τ whose false abstention rate on answerable questions stays ≤ 5%).
 # The asymmetry justifies erring loose: a wrong gate abstention never reaches
 # the LLM and is unrecoverable, whereas weak Evidence let through still meets
 # the prompt backstop. Distances are cosine and lower-is-closer, so the gate
 # reads `distance > τ` and a larger τ is the more permissive one.
+#
+# `provisional` is read by every surface, not only by whoever edits this file:
+# the CLI prints an admission beside an abstention, and the Week 5 interface
+# shows the same thing on the page (PLAN.md §第 5 週). That is why it is carried
+# as data rather than left as a comment here -- flipping it to False in Week 6
+# has to be the only edit, or a notice outlives the condition it describes on
+# whichever surface was forgotten.
 DISTANCE_THRESHOLD = DistanceThreshold(
     value=0.85,
     embedding_model="text-embedding-3-small",
