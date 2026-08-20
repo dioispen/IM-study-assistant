@@ -81,7 +81,7 @@ def test_english_embeddings_are_unchanged_by_the_shared_tokenizer():
     # already bounded a word for both rules, so English must not move at all.
     #
     # A migration guard for this one swap, not a standing invariant. ADR-0004
-    # says tests must not pin the measure, because Week 5 replaces it with a
+    # says tests must not pin the measure, because Week 6 replaces it with a
     # real tokenizer -- and records that doing so "shifts English counts as
     # well as Chinese ones". So this test is expected to fail at that swap, and
     # the correct response then is to delete it along with LEGACY_WORD_RE and

@@ -17,7 +17,7 @@ carrying only the last section's Locator.
 Adopting `tiktoken` instead was considered and rejected. It shifts English
 counts as well as Chinese ones, which would force `MIN_SECTION_TOKENS` and
 `MAX_SECTION_TOKENS` to be re-picked, and PLAN.md defers picking a real
-tokenizer to Week 5, where it belongs beside the threshold sweep that choice
+tokenizer to Week 6, where it belongs beside the threshold sweep that choice
 invalidates. The heuristic keeps English counts essentially unchanged and puts
 Chinese in the right order of magnitude — `text-embedding-3-small` splits
 Chinese into roughly one to two tokens per character — so one pair of numbers
@@ -27,12 +27,12 @@ The windowed chunking path for unstructured Documents does not exist yet. When
 it lands, its `window` and `overlap` are counted with this same function rather
 than a second measure of its own: a window sized in whitespace-words would
 swallow a whole Chinese page exactly as section thresholds swallowed a whole
-Chinese section, and two measures would leave Week 5 sweeping two sets of
+Chinese section, and two measures would leave Week 6 sweeping two sets of
 numbers against two definitions of a token.
 
 ## Consequences
 
-This is a placeholder, and stays one until Week 5 replaces it. Whoever does
+This is a placeholder, and stays one until Week 6 replaces it. Whoever does
 inherits every call site of `core/tokenization.py` and the obligation to
 re-sweep the thresholds behind them, because a new measure moves the counts
 those numbers were picked against. Tests therefore pin chunking behaviour — how many Chunks a note became, which Locator each

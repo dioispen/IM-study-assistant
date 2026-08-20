@@ -310,7 +310,7 @@ def test_ask_never_asserts_on_generated_text_only_on_evidence(tmp_path):
 # The fixtures are sized so that one section of each branch exists under those
 # numbers: 三向交握 is oversized, 概述 is undersized, and 連線終止, 分層架構 and
 # 封裝 all sit between. No test here asserts a token count for a string -- the
-# measure behind the counts is a placeholder due for replacement in Week 5
+# measure behind the counts is a placeholder due for replacement in Week 6
 # (ADR-0004), so what is pinned is the chunking that came out of it.
 
 
