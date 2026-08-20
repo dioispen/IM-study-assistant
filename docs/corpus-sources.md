@@ -56,15 +56,18 @@ Re-running is idempotent; a checkout already at the pinned commit is skipped.
 Bumping the corpus means editing `commit` in the script, and any tau swept
 against the old commit has to be re-derived (ADR-0003).
 
-**Ingesting it:** `ingest_folder` globs `*.md` one level deep, not
-recursively (#15), so until that lands each chapter directory is its own run:
+**Ingesting it:** one run over the whole tree. `ingest_folder` walks nested
+folders (#15, landed), so pointing it at `zh-hant/docs` covers every chapter
+directory beneath it:
 
 ```
-python cli.py ingest data/corpus/hello-algo/zh-hant/docs/chapter_tree --domain dsa
+python cli.py ingest data/corpus/hello-algo/zh-hant/docs --domain dsa
 ```
 
-Pointing it at `zh-hant/docs` itself today ingests `index.md` and reports
-`Ingested 1` — the silent gap #15 describes, seen on a real corpus.
+The same walk is what retires: a Document ingested from beneath this folder and
+no longer found there leaves the corpus with its Chunks, named in the run's
+report (ADR-0005). So bumping the pinned commit and re-running is how the
+corpus follows upstream — deletions included — rather than a manual cleanup.
 
 ## Why none of this belongs in `tests/fixtures/`
 
