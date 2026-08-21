@@ -1,5 +1,5 @@
-"""Command-line entry point: ingest a folder of notes, or ask a question and
-get a cited answer with source cards."""
+"""Command-line entry point: ingest a folder of Documents, or ask a question
+and get a cited answer with source cards."""
 
 import argparse
 import sys
@@ -177,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest_parser = subparsers.add_parser(
-        "ingest", help="Ingest a folder of .md and .docx notes"
+        "ingest", help="Ingest a folder of .md, .docx and .pdf Documents"
     )
     # No --corpus-root override, for the reason --distance-threshold has none:
     # a Document is identified by its path below one root, and a per-run root
@@ -187,12 +187,19 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "folder",
         help=(
-            "Folder of .md and .docx notes beneath the corpus root, including any "
-            "in its subfolders. Both formats ingest in one run, routed by the "
-            "file's own format"
+            "Folder of .md, .docx and .pdf Documents beneath the corpus root, "
+            "including any in its subfolders. Every format ingests in one run, "
+            "routed by the file's own format -- which also picks how it is "
+            "chunked: headings where the format has them, fixed windows with "
+            "page citations where it does not"
         ),
     )
     ingest_parser.add_argument("--domain", required=True, choices=DOMAINS)
+    # Whose words these are, and nothing about the file (CONTEXT.md). It does
+    # not pick a reader and it does not pick a chunking path -- both of those
+    # follow from the format -- so `--source-type paper` over a folder of
+    # Markdown is a coherent thing to say, and a PDF is windowed whether it is
+    # called a paper or a note.
     ingest_parser.add_argument("--source-type", default="note")
     ingest_parser.add_argument("--language", default=DEFAULT_LANGUAGE)
     ingest_parser.set_defaults(func=cmd_ingest)

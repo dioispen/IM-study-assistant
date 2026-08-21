@@ -24,6 +24,14 @@ for a reader who wants to go look. Always present; its shape depends on what
 the Document offers — a heading path, a page, an anchor.
 _Avoid_: section, position, offset, citation
 
+**Extent**:
+The stretch of a Document that one Locator names, in a Document whose format
+offers somewhere to cite but nowhere to split — a page, an article's body. What
+a Chunk is cut _from_ and cited _by_ on the windowed path, and never a Chunk
+itself: several Chunks can start in one Extent, and one Chunk can run across
+two.
+_Avoid_: passage, page, block, unit
+
 **Evidence**:
 The Chunks retrieved for one question and passed to generation, after any
 diversity limits are applied. Everything the answer may rest on, and the only

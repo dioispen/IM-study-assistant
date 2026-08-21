@@ -1,5 +1,13 @@
+import pytest
+
 from config import MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
-from core.chunking import chunk_sections, parse_markdown_sections
+from core.chunking import (
+    Extent,
+    chunk_sections,
+    chunk_windows,
+    parse_markdown_sections,
+)
+from core.tokenization import count_tokens
 
 
 def chunk_markdown(text: str, min_tokens: int, max_tokens: int):
@@ -194,3 +202,191 @@ def test_heading_stack_resets_on_shallower_heading():
     chunks = chunk_markdown(text, min_tokens=10, max_tokens=30)
 
     assert [c.locator for c in chunks] == ["BST › Insertion", "AVL › Insertion"]
+
+
+# The windowed path (#7). Its rules are about a Document with nothing to split
+# on, so each test below states one over Extents -- a PDF's pages are what
+# production hands it (ingestion/extraction.py), but nothing here is about a
+# PDF. No test asserts a token count for a string, for ADR-0004's reason: the
+# measure behind the counts is a placeholder due for replacement in Week 6.
+
+PAGE_ONE = "alpha " * 30
+PAGE_TWO = "bravo " * 30
+
+
+def windows(extents, window, overlap):
+    return chunk_windows(extents, window=window, overlap=overlap)
+
+
+def test_a_window_shorter_than_the_document_yields_several_chunks():
+    chunks = windows([Extent(locator="p. 1", text="word " * 100)], window=30, overlap=5)
+
+    assert len(chunks) > 1
+    assert [c.ordinal for c in chunks] == list(range(len(chunks)))
+
+
+def test_a_document_shorter_than_one_window_is_a_single_chunk():
+    chunks = windows([Extent(locator="p. 1", text=PAGE_ONE)], window=100, overlap=20)
+
+    assert len(chunks) == 1
+    # Verbatim, trailing whitespace included: the only window runs from the
+    # start of the text to the end of it, so nothing is reflowed away.
+    assert chunks[0].text == PAGE_ONE
+
+
+def test_consecutive_windows_repeat_the_overlap():
+    # What the overlap is for: a sentence sitting on the seam between two
+    # windows is whole in one of them rather than halved into both.
+    text = " ".join(f"w{i}" for i in range(60))
+
+    chunks = windows([Extent(locator="p. 1", text=text)], window=20, overlap=5)
+
+    first, second = chunks[0], chunks[1]
+    assert first.text.split()[-5:] == second.text.split()[:5]
+
+
+def test_no_window_exceeds_the_configured_size():
+    chunks = windows([Extent(locator="p. 1", text="word " * 250)], window=40, overlap=10)
+
+    assert all(count_tokens(c.text) <= 40 for c in chunks)
+
+
+def test_every_word_of_the_document_appears_in_some_window():
+    text = " ".join(f"w{i}" for i in range(97))  # not a multiple of the stride
+
+    chunks = windows([Extent(locator="p. 1", text=text)], window=20, overlap=5)
+
+    covered = {word for chunk in chunks for word in chunk.text.split()}
+    assert covered == set(text.split())
+
+
+def test_the_final_window_carries_more_than_the_overlap_it_repeats():
+    # Otherwise the tail of a Document that does not divide evenly comes back
+    # as a Chunk that is entirely a copy of the one before it -- a duplicate in
+    # the Evidence, spending a retrieval slot to say what the previous Chunk
+    # already said.
+    text = " ".join(f"w{i}" for i in range(83))
+
+    chunks = windows([Extent(locator="p. 1", text=text)], window=20, overlap=5)
+
+    last, previous = chunks[-1], chunks[-2]
+    assert not set(last.text.split()) <= set(previous.text.split())
+
+
+def test_a_chunk_is_cited_by_the_extent_it_starts_in():
+    chunks = windows(
+        [Extent(locator="p. 1", text=PAGE_ONE), Extent(locator="p. 2", text=PAGE_TWO)],
+        window=30,
+        overlap=0,
+    )
+
+    assert [c.locator for c in chunks] == ["p. 1", "p. 2"]
+
+
+def test_a_window_straddling_two_extents_is_cited_by_the_one_it_starts_in():
+    # The window is fixed and the extent boundary is not a boundary it
+    # respects, so a Chunk really does hold text from two pages. It is cited by
+    # the page a reader following the citation starts reading at.
+    chunks = windows(
+        [Extent(locator="p. 1", text=PAGE_ONE), Extent(locator="p. 2", text=PAGE_TWO)],
+        window=40,
+        overlap=0,
+    )
+
+    assert chunks[0].locator == "p. 1"
+    assert "alpha" in chunks[0].text and "bravo" in chunks[0].text
+
+
+def test_no_chunk_has_an_empty_locator():
+    chunks = windows(
+        [Extent(locator=f"p. {n}", text="word " * 40) for n in range(1, 4)],
+        window=25,
+        overlap=5,
+    )
+
+    assert chunks
+    assert all(c.locator for c in chunks)
+
+
+def test_an_extent_with_no_text_is_never_cited():
+    # A blank page in a scanned paper is a place in the Document, not a span of
+    # it -- dropped exactly as a heading with nothing under it is dropped from
+    # the structured path.
+    chunks = windows(
+        [
+            Extent(locator="p. 1", text=PAGE_ONE),
+            Extent(locator="p. 2", text="   \n  "),
+            Extent(locator="p. 3", text=PAGE_TWO),
+        ],
+        window=30,
+        overlap=0,
+    )
+
+    assert "p. 2" not in {c.locator for c in chunks}
+
+
+def test_a_document_with_no_text_at_all_yields_no_chunks():
+    assert windows([Extent(locator="p. 1", text="  \n ")], window=30, overlap=5) == []
+
+
+def test_an_overlap_at_least_as_large_as_the_window_is_refused():
+    # It is not a bad chunking, it is no chunking: the window never advances,
+    # so the Document is cut into an unbounded number of copies of its opening.
+    with pytest.raises(ValueError, match="overlap"):
+        windows([Extent(locator="p. 1", text=PAGE_ONE)], window=20, overlap=20)
+
+
+def test_a_window_of_no_tokens_is_refused():
+    with pytest.raises(ValueError, match="window"):
+        windows([Extent(locator="p. 1", text=PAGE_ONE)], window=0, overlap=0)
+
+
+def test_an_extent_with_no_locator_is_refused():
+    # The path's one promise to the reader, enforced where it is made rather
+    # than trusted of each reader in turn. An unstructured Document has nothing
+    # but its Locator to be cited by, so a Chunk without one renders as a
+    # source card ending in a dash: unfollowable, and not visibly so.
+    with pytest.raises(ValueError, match="locator"):
+        windows([Extent(locator="", text=PAGE_ONE)], window=30, overlap=5)
+
+
+def test_one_unnamed_extent_refuses_the_whole_document():
+    # Not "chunk the named ones and drop the rest": a Document half of whose
+    # Chunks are missing is a corpus gap nobody sees, whereas a run that fails
+    # names the file in its report (#4).
+    with pytest.raises(ValueError, match="locator"):
+        windows(
+            [Extent(locator="p. 1", text=PAGE_ONE), Extent(locator="", text=PAGE_TWO)],
+            window=30,
+            overlap=5,
+        )
+
+
+ZH_PAPER_PAGE = (
+    "本文提出一套以資源配置圖為基礎的死結偵測方法，並在多核心環境下評估其成本。"
+    "實驗顯示，當資源種類增加時，偵測的執行時間呈現次線性成長。"
+)
+
+
+def test_a_chinese_document_is_windowed_by_the_same_token_measure():
+    # ADR-0004's obligation on this path, and the failure it names: a window
+    # sized in whitespace-words reads a whole Chinese page as one or two words,
+    # never reaches its own size, and returns the page as a single Chunk.
+    page = ZH_PAPER_PAGE * 4
+
+    chunks = windows([Extent(locator="p. 1", text=page)], window=40, overlap=8)
+
+    assert len(chunks) > 1
+    assert all(count_tokens(c.text) <= 40 for c in chunks)
+    assert all(c.locator == "p. 1" for c in chunks)
+
+
+def test_a_chinese_window_is_a_verbatim_span_of_its_document():
+    # The oversized splitter's property, on this path: the source string is cut
+    # between token offsets rather than rejoined from token strings, so a
+    # Chunk's text is text the Document contains.
+    page = ZH_PAPER_PAGE * 4
+
+    chunks = windows([Extent(locator="p. 1", text=page)], window=40, overlap=8)
+
+    assert all(chunk.text in page for chunk in chunks)

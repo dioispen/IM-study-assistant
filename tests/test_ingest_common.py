@@ -5,6 +5,7 @@ from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
 from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
 from tests.docx_fixture import BODY, resave_untouched, write_docx
+from tests.pdf_fixture import truncate, write_pdf
 
 
 class CountingEmbedder:
@@ -643,7 +644,7 @@ def test_a_document_that_fails_extraction_is_reported_and_the_run_continues(tmp_
 def test_a_document_that_cannot_be_opened_is_reported_and_the_run_continues(tmp_path):
     # A directory matching *.md is the portable stand-in for the real cases --
     # a note locked by an editor, mid-sync, or deleted since the glob. All
-    # reach extract_note as OSError, and none should cost the folder the
+    # reach extract_document as OSError, and none should cost the folder the
     # notes that come after it.
     folder = tmp_path / "dsa"
     folder.mkdir()
@@ -714,13 +715,25 @@ def test_the_report_counts_ingested_skipped_and_failed(tmp_path):
 # Mixed formats. Everything above is Markdown, which is how "the walk looks for
 # *.md" survived a green suite: a corpus owner pointing ingestion at a folder
 # of Word notes was told "Ingested 0" and nothing was wrong. These pin that the
-# walk routes by format, that one bad file in either format costs the run only
-# itself, and that both formats reach the registry from a single run (#9).
+# walk routes by format, that one bad file in any format costs the run only
+# itself, and that every format reaches the registry from a single run (#9,
+# and PDF with #7).
 
 ZH_LAYERING_NOTE = (
     "# OSI 參考模型\n\n## 分層架構\n\n應用層之下依序是傳輸層、網路層與連結層。"
 )
 ZH_LAYERING_BODY = "應用層之下依序是傳輸層、網路層與連結層。"
+
+# A paper, for the format that has pages and no headings. Short enough to sit
+# on one page of the fixture writer and long enough to be prose rather than a
+# label -- the windowing itself is unit-tested in test_chunking.py, so what
+# these need of it is only that it happened.
+ZH_PAPER_PAGE_ONE = (
+    "本文比較數種分層協定堆疊的實作成本，並以延遲與吞吐量兩項指標評估其取捨。"
+)
+ZH_PAPER_PAGE_TWO = (
+    "實驗在同一組硬體上重複三十次，結果顯示分層帶來的額外複製成本可被批次處理攤平。"
+)
 
 
 def test_a_mixed_folder_ingests_both_formats_in_one_run(tmp_path):
@@ -808,14 +821,16 @@ def test_a_word_lock_file_is_not_read_as_a_note(tmp_path):
 
 
 def test_a_file_of_no_readable_format_is_neither_ingested_nor_reported(tmp_path):
-    # A vault holds images, PDFs and exports beside the notes. None of them is
-    # a note the structured path can read, and none of them is a broken note
-    # either -- warning about each one every run would bury the warnings that
-    # are about notes. PDF joins the walk with the windowed path (#7).
+    # A vault holds images, spreadsheets and exports beside the notes. None of
+    # them is a Document any reader can make sense of, and none of them is a
+    # broken one either -- warning about each one every run would bury the
+    # warnings that are about notes. PDF used to be on this list and is not any
+    # more: it has a reader of its own now (#7), which is what the tests below
+    # pin so this one cannot quietly reclaim it.
     folder = tmp_path / "network"
     folder.mkdir()
-    (folder / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    (folder / "scan.pdf").write_bytes(b"%PDF-1.7")
+    (folder / "diagram.png").write_bytes(b"IMAGE_MAGIC_BYTES")
+    (folder / "grades.xlsx").write_bytes(b"PK_A_SPREADSHEET")
     (folder / "osi_model.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
     registry, store = _registry_and_store(tmp_path)
 
@@ -823,6 +838,63 @@ def test_a_file_of_no_readable_format_is_neither_ingested_nor_reported(tmp_path)
 
     assert report.ingested == [derive_doc_id("network/osi_model.md")]
     assert report.failed == []
+
+
+def test_a_pdf_beside_the_notes_joins_the_walk(tmp_path):
+    # One run over the folder the corpus owner actually keeps their material
+    # in, with no flag naming a format: the walk routes each file by its own
+    # suffix, so a paper filed beside the notes on the subject lands with them.
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "osi_model.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
+    write_pdf(folder / "layering_survey.pdf", [ZH_PAPER_PAGE_ONE, ZH_PAPER_PAGE_TWO])
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert sorted(report.ingested) == sorted(
+        [
+            derive_doc_id("network/osi_model.md"),
+            derive_doc_id("network/layering_survey.pdf"),
+        ]
+    )
+    assert report.failed == []
+
+
+def test_a_broken_pdf_is_reported_and_costs_the_walk_nothing_else(tmp_path):
+    # The run report contract from #4 over the new format: a truncated download
+    # is one file named in the report, not a traceback that aborts the walk and
+    # takes the retirement sweep with it.
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "osi_model.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
+    truncate(
+        write_pdf(tmp_path / "intact.pdf", [ZH_PAPER_PAGE_ONE]),
+        folder / "layering_survey.pdf",
+    )
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert report.ingested == [derive_doc_id("network/osi_model.md")]
+    [failure] = report.failed
+    assert failure.source_path == "network/layering_survey.pdf"
+    assert registry.get(failure.doc_id) is None
+
+
+def test_a_scanned_pdf_is_reported_as_having_no_text_layer(tmp_path):
+    # The failure that would otherwise arrive as "yielded no chunks", which
+    # sends the corpus owner looking for an empty file rather than for OCR.
+    folder = tmp_path / "network"
+    folder.mkdir()
+    write_pdf(folder / "scan.pdf", ["", ""])
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    [failure] = report.failed
+    assert "text layer" in failure.reason
+    assert report.ingested == []
 
 
 def test_reingesting_an_unchanged_docx_note_does_no_embedding_work(tmp_path):

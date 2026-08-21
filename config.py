@@ -52,6 +52,21 @@ CORPUS_ROOT = DATA_DIR / "corpus"
 MIN_SECTION_TOKENS = 40
 MAX_SECTION_TOKENS = 300
 
+# Window size and overlap for the windowed chunking path -- what a Document
+# with no headings to split on is cut by (ADR-0007, which says why these two
+# numbers are the ones the path has). Same token measure as the thresholds
+# above, on which ADR-0004 insists by name.
+#
+# The window matches MAX_SECTION_TOKENS so that a Chunk is about the same size
+# whichever path produced it; the two paths' Chunks compete in one ranking, and
+# ADR-0007 prices what a size difference between them would cost. The overlap
+# is a fifth of that: a sentence or two of run-up, so a fact stated across a
+# window seam is whole in one of the two Chunks rather than halved into both.
+# Both are placeholders due for the Week 6 sweep (PLAN.md §5.3), which is what
+# they live here for.
+WINDOW_TOKENS = 300
+WINDOW_OVERLAP_TOKENS = 60
+
 EMBEDDING_MODEL = "text-embedding-3-small"
 GENERATION_MODEL = "gpt-4o-mini"
 

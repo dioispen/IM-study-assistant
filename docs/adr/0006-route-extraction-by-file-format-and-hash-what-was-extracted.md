@@ -111,3 +111,11 @@ Formats with no headings to split on are still out. PDF needs the windowed path,
 deferred with the other unstructured Sources (PLAN.md §五) — the split is by
 chunking path, not by the word "note". When it arrives it adds a reader here and
 a second path beside `chunk_sections`, not a change to either.
+
+> **Superseded in part by
+> [0007](./0007-window-across-the-whole-document-and-cite-where-a-chunk-starts.md).**
+> PDF has landed, and the paragraph above held: it added `_extract_pdf` here and
+> `chunk_windows` beside `chunk_sections`, and changed neither. What 0007 does
+> change is the shape a reader may hand back — Sections or Extents, rather than
+> Sections alone — because the structure a format could recover is what picks
+> the chunking path.

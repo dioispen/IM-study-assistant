@@ -1,7 +1,12 @@
-"""Seam tests for the walking skeleton: ingest a fixture corpus of notes --
-Markdown, and Word beside it -- then ask questions against it. Fully offline
-(FakeEmbedder, FakeGenerator) and asserts only on retrieved doc_ids and
-Locators -- never on generated text (ADR-0002).
+"""Seam tests for the walking skeleton: ingest a fixture corpus -- Markdown
+notes, Word beside them, and a PDF paper beside both -- then ask questions
+against it. Fully offline (FakeEmbedder, FakeGenerator) and asserts only on
+retrieved doc_ids and Locators -- never on generated text (ADR-0002).
+
+Both chunking paths are exercised here, because both reach the reader through
+the same `ask`: a note is cited by its heading path and a paper by its page,
+and which one a Document gets follows from what its format could offer rather
+than from anything the run was told (ADR-0007).
 """
 
 import re
@@ -14,8 +19,10 @@ from core.gate import ABSTENTION_TEXT
 from core.generator import FakeGenerator
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
+from cli import source_card
 from ingestion.common import ingest_folder
 from tests.docx_fixture import BODY, corrupt_a_part, write_docx
+from tests.pdf_fixture import write_pdf
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 
@@ -856,3 +863,275 @@ def test_reingesting_the_unchanged_mixed_corpus_skips_every_note(tmp_path):
 
     assert second.ingested == []
     assert sorted(second.skipped) == sorted(first.ingested)
+
+
+# Papers. Every fixture above is a note with headings, which is the only kind
+# of Document the pipeline could hold until now: a paper has no heading a
+# reader can trust and, in the two-column layout most of them arrive in, none a
+# reader can even find. These ingest one at the window and overlap config.py
+# ships and read its citation back through `ask` -- the entry point a citation
+# actually reaches the reader through (#7).
+#
+# The fixture paper is written at test time rather than committed, for the
+# reason docs/corpus-sources.md gives and the reason tests/docx_fixture.py
+# gives: a committed fixture has to be reviewable in a diff, and a PDF is a
+# binary container. See tests/pdf_fixture.py.
+
+PAPER_ID = derive_doc_id("os/deadlock_detection_survey.pdf")
+
+PAGE_LOCATOR = re.compile(r"p\. \d+")
+
+# Three pages of a plausible paper on deadlock detection. Each is sized to run
+# past one window on its own, so the paper chunks into several Chunks over
+# several pages rather than into one Chunk per page, which could carry any page
+# number and still look right. The vocabulary is deliberately the paper's own
+# -- 等待圖, 次線性, 犧牲者 -- so a question can reach it rather than reaching
+# whichever Document shares the most ordinary words.
+PAPER_PAGE_ONE = (
+    "本文提出一套以等待圖為基礎的死結偵測方法，並在多核心環境下量測其成本。"
+    "既有做法多半在每次資源請求時即時檢查環路，於請求密集的工作負載下開銷過高。"
+    "我們改以週期性掃描取代即時檢查，並分析掃描週期與偵測延遲之間的取捨。"
+    "本節其餘部分先回顧相關研究，再說明本文的三項貢獻。"
+) * 2
+PAPER_PAGE_TWO = (
+    "偵測程序週期性地掃描等待圖，將已完成的行程自圖中移除，再檢查剩餘節點是否成環。"
+    "為降低掃描成本，實作上維護一份增量更新的鄰接串列，只在邊集合變動時重算受影響的分量。"
+    "當偵測到環路時，復原模組依行程已耗用的資源量挑選犧牲者，並記錄回復點以便重新執行。"
+    "犧牲者選擇的準則在第四節與其他三種啟發式規則一併比較。"
+) * 2
+PAPER_PAGE_THREE = (
+    "實驗顯示，當資源種類增加時，偵測的執行時間呈現次線性成長，記憶體用量則維持穩定。"
+    "在請求密集的工作負載下，週期性掃描的總開銷約為即時檢查的四成，偵測延遲則增加一個掃描週期。"
+    "這個取捨對批次系統有利，對互動式系統則需要更短的掃描週期，我們在第五節討論如何選擇。"
+    "最後我們指出本方法在分散式環境下的限制，並說明後續工作的方向。"
+) * 2
+
+PAPER_PAGES = [PAPER_PAGE_ONE, PAPER_PAGE_TWO, PAPER_PAGE_THREE]
+
+# A question whose vocabulary belongs to the paper and to nothing else in the
+# corpus. It asks after the paper's own result, which is stated on page three.
+ZH_PAPER_QUESTION = "偵測的執行時間隨資源種類增加呈現次線性成長"
+
+
+def _ingest_paper(tmp_path, pages=PAPER_PAGES):
+    """A corpus holding one paper, ingested at the window config.py ships.
+
+    Its own registry and store, for the reason `_ingest_with_chinese` gives at
+    length: the gate tests read distances off `_ingest_corpus`'s store, and a
+    Chinese Chunk sized for the configured parameters fills enough of
+    FakeEmbedder's 64 buckets to pull the out-of-corpus trap inside GATE_TAU by
+    collision alone.
+    """
+    corpus = tmp_path / "corpus"
+    folder = corpus / "os"
+    folder.mkdir(parents=True)
+    write_pdf(folder / "deadlock_detection_survey.pdf", pages)
+
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    embedder = FakeEmbedder()
+    report = ingest_folder(
+        folder=folder,
+        domain="os",
+        source_type="paper",
+        registry=registry,
+        store=store,
+        embedder=embedder,
+        corpus_root=corpus,
+    )
+    return registry, store, embedder, report
+
+
+def _paper_chunks(store, doc_id=PAPER_ID):
+    """A Document's Chunks as (locator, text), in ordinal order."""
+    result = store.collection.get(where={"doc_id": doc_id})
+    return [
+        (meta["locator"], text)
+        for meta, text in sorted(
+            zip(result["metadatas"], result["documents"]),
+            key=lambda pair: pair[0]["ordinal"],
+        )
+    ]
+
+
+def test_a_paper_ingests_under_its_own_source_type(tmp_path):
+    # Source type is an open enumeration (CONTEXT.md), so a second one costs
+    # the schema nothing -- which is what PLAN.md §5.2 promised when this whole
+    # package was deferred, asserted here rather than assumed.
+    registry, _store, _embedder, report = _ingest_paper(tmp_path)
+
+    assert report.ingested == [PAPER_ID]
+    assert report.failed == []
+    [paper] = registry.list()
+    assert paper.source_type == "paper"
+    assert paper.source_path == "os/deadlock_detection_survey.pdf"
+    assert paper.title == "deadlock detection survey"
+
+
+def test_every_chunk_of_a_paper_carries_a_page_locator(tmp_path):
+    # The acceptance criterion this issue exists for: the Source most in need
+    # of precise citation always cites a page, and no Locator is ever empty.
+    _registry, store, _embedder, _report = _ingest_paper(tmp_path)
+
+    chunks = _paper_chunks(store)
+
+    assert chunks
+    assert all(PAGE_LOCATOR.fullmatch(locator) for locator, _ in chunks)
+
+
+def test_a_paper_becomes_more_chunks_than_it_has_pages(tmp_path):
+    # The windowed path really ran. A reader that handed each page back whole
+    # would also produce page Locators and pass the test above, while embedding
+    # a whole page as one vector -- the shape #11 was opened about, arriving
+    # here by a different route.
+    _registry, store, _embedder, _report = _ingest_paper(tmp_path)
+
+    assert len(_paper_chunks(store)) > len(PAPER_PAGES)
+
+
+def test_a_papers_chunks_cite_pages_in_reading_order(tmp_path):
+    # Ordinals run with the paper, so a Chunk's page never goes backwards as
+    # the ordinals go forwards. A window is cited by the page it starts in, so
+    # consecutive Chunks may share a page; what they may not do is cite an
+    # earlier one, which is what a reader following two citations in a row
+    # would experience as the numbering being made up.
+    _registry, store, _embedder, _report = _ingest_paper(tmp_path)
+
+    pages = [int(locator.removeprefix("p. ")) for locator, _ in _paper_chunks(store)]
+
+    assert pages == sorted(pages)
+    assert pages[0] == 1
+
+
+def test_consecutive_chunks_of_a_paper_overlap(tmp_path):
+    # The overlap is half the reason this path exists rather than a plain cut
+    # every N tokens: a sentence sitting on a window seam is whole in one of
+    # the two Chunks instead of halved into both.
+    _registry, store, _embedder, _report = _ingest_paper(tmp_path)
+
+    (_, first), (_, second) = _paper_chunks(store)[:2]
+
+    assert first[-20:] in second
+
+
+def test_a_question_is_answered_citing_the_paper_by_page(tmp_path):
+    # The seam test the issue asks for, end to end: ingest a paper, ask a
+    # question, read back the citation the reader would be shown.
+    _registry, store, embedder, _report = _ingest_paper(tmp_path)
+
+    answer = ask(
+        ZH_PAPER_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    [cited] = answer.evidence
+    assert cited.doc_id == PAPER_ID
+    assert cited.source_type == "paper"
+    assert PAGE_LOCATOR.fullmatch(cited.locator)
+    assert "次線性成長" in cited.text
+
+
+def test_the_page_a_paper_is_cited_by_is_a_page_its_text_is_on(tmp_path):
+    # What makes the citation worth printing at all. The sentence the question
+    # asks after is on page three, so the Chunk holding it is cited by page
+    # three -- or by page two, if the window carrying it opened there and ran
+    # across the break. Never by a page after it, and never by one the sentence
+    # is nowhere near.
+    _registry, store, embedder, _report = _ingest_paper(tmp_path)
+
+    answer = ask(
+        ZH_PAPER_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+
+    assert answer.evidence[0].locator in {"p. 2", "p. 3"}
+
+
+def test_a_source_card_for_a_paper_names_its_page(tmp_path):
+    # The line the reader actually follows back. `source_card` is written over
+    # RetrievedChunk and knows nothing about pages, which is what lets a second
+    # Locator shape reach the reader with no change to the CLI -- the promise
+    # PLAN.md §5.2 made for `locator` when this package was deferred.
+    _registry, store, embedder, _report = _ingest_paper(tmp_path)
+
+    answer = ask(
+        ZH_PAPER_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=1,
+        distance_threshold=PASS_EVERYTHING,
+    )
+    [cited] = answer.evidence
+
+    assert source_card(cited) == (
+        f"- deadlock detection survey (paper) — {cited.locator}"
+    )
+
+
+def test_reingesting_an_unchanged_paper_skips_it(tmp_path):
+    # A format whose skip does not hold re-embeds its share of the corpus every
+    # run, which is invisible until the bill arrives -- and a paper is the
+    # largest Document the corpus holds.
+    corpus = tmp_path / "corpus"
+    folder = corpus / "os"
+    folder.mkdir(parents=True)
+    write_pdf(folder / "deadlock_detection_survey.pdf", PAPER_PAGES)
+    kwargs = dict(
+        folder=folder,
+        domain="os",
+        source_type="paper",
+        registry=Registry(tmp_path / "documents.sqlite"),
+        store=VectorStore(path=tmp_path / "chroma"),
+        embedder=FakeEmbedder(),
+        corpus_root=corpus,
+    )
+
+    first = ingest_folder(**kwargs)
+    second = ingest_folder(**kwargs)
+
+    assert first.ingested == [PAPER_ID]
+    assert second.ingested == []
+    assert second.skipped == [PAPER_ID]
+
+
+def test_a_paper_and_a_note_ingest_side_by_side_each_cited_its_own_way(tmp_path):
+    # Two Source types in one corpus, which is what this whole deferred package
+    # was waiting on (PLAN.md §五). The point is not which Document wins a
+    # question: it is that one walk reaches both, and that each comes back
+    # cited in the shape its own format offers -- the paper by page, the note
+    # by heading path.
+    corpus = tmp_path / "corpus"
+    folder = corpus / "os"
+    folder.mkdir(parents=True)
+    write_pdf(folder / "deadlock_detection_survey.pdf", PAPER_PAGES)
+    shutil.copy(FIXTURES / "os" / "deadlock.md", folder / "deadlock.md")
+
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    ingest_folder(
+        folder=folder,
+        domain="os",
+        source_type="paper",
+        registry=registry,
+        store=store,
+        embedder=FakeEmbedder(),
+        corpus_root=corpus,
+    )
+
+    note_id = derive_doc_id("os/deadlock.md")
+    assert {doc.doc_id for doc in registry.list()} == {PAPER_ID, note_id}
+    assert all(
+        PAGE_LOCATOR.fullmatch(locator) for locator, _ in _paper_chunks(store)
+    )
+    assert {locator for locator, _ in _paper_chunks(store, note_id)} == {
+        "Deadlock › Conditions"
+    }

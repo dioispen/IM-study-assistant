@@ -1,11 +1,17 @@
-"""Ingests a folder of notes -- every one beneath it, at any depth outside a
-dot-prefixed directory -- into the Document registry and Chunk store:
-content-hash skip (ADR-0001), structured chunking, batch embedding.
+"""Ingests a folder of Documents -- every one beneath it, at any depth outside
+a dot-prefixed directory -- into the Document registry and Chunk store:
+content-hash skip (ADR-0001), chunking, batch embedding.
 
-Markdown and Word notes ingest side by side in one run, routed by file format
+Markdown, Word and PDF ingest side by side in one run, routed by file format
 alone (ingestion/extraction.py) and never by a flag on the invocation: the
-corpus owner points ingestion at the folder their notes are in, and a note is a
-note whichever program wrote it.
+corpus owner points ingestion at the folder their material is in, and a note is
+a note whichever program wrote it.
+
+Which chunking path a Document takes follows from what its reader could
+recover, not from what the run was told it is ingesting: a file with headings
+comes back as Sections and is chunked by them, a file with only pages comes
+back as Extents and is windowed (ADR-0007). So `--source-type paper` says
+whose words these are and nothing about how they are cut.
 
 The folder is where the run starts, not what a Document is named by: identity
 is the path below `corpus_root` (config.py's CORPUS_ROOT, which says why).
@@ -26,12 +32,25 @@ import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import CORPUS_ROOT, MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
-from core.chunking import chunk_sections
+from config import (
+    CORPUS_ROOT,
+    MAX_SECTION_TOKENS,
+    MIN_SECTION_TOKENS,
+    WINDOW_OVERLAP_TOKENS,
+    WINDOW_TOKENS,
+)
+from core.chunking import ChunkDraft, chunk_sections, chunk_windows
 from core.embedder import Embedder
 from core.registry import Document, Registry, content_hash, derive_doc_id
 from core.store import ChunkRecord, VectorStore
-from ingestion.extraction import NOTE_SUFFIXES, ExtractionError, extract_note
+from ingestion.extraction import (
+    DOCUMENT_SUFFIXES,
+    ExtractedDocument,
+    ExtractionError,
+    StructuredDocument,
+    UnstructuredDocument,
+    extract_document,
+)
 
 
 class OutsideCorpusRoot(Exception):
@@ -106,45 +125,49 @@ def _derive_title(path: Path) -> str:
 _WORD_LOCK_PREFIX = "~$"
 
 
-def _notes_beneath(folder: Path) -> list[tuple[str, Path]]:
-    """Every note beneath `folder`, as (path relative to it, path).
+def _documents_beneath(folder: Path) -> list[tuple[str, Path]]:
+    """Every Document beneath `folder`, as (path relative to it, path).
 
     The whole tree, not one flat level: a student's notes live in subfolders,
     and one that is never read is not a failure anyone sees -- it is a hole in
     the corpus that surfaces months later as an abstention on a question they
     know they wrote notes about.
 
-    Every readable format, not one: a mixed `.md` and `.docx` folder is what a
-    student's notes actually look like, and NOTE_SUFFIXES is what says which
-    formats the structured path can read. Matched case-insensitively, so
-    `NOTES.DOCX` is the same note on Windows and on Linux -- `rglob` case-folds
-    on one and not the other, and a corpus that ingests differently per machine
-    would derive doc_ids that exist on one and not the other.
+    Every readable format, not one: a folder mixing `.md`, `.docx` and the
+    `.pdf` of a paper is what a student's material actually looks like, and
+    DOCUMENT_SUFFIXES is what says which formats have a reader at all. It says
+    nothing about how any of them is chunked -- that follows from what the
+    reader recovered (ADR-0007) -- so a format joins this walk by having a
+    reader, not by taking a particular path afterwards. Matched
+    case-insensitively, so `NOTES.DOCX` is the same note on Windows and on
+    Linux -- `rglob` case-folds on one and not the other, and a corpus that
+    ingests differently per machine would derive doc_ids that exist on one and
+    not the other.
 
     Two exclusions. Dot-prefixed directories: a note vault keeps `.trash/` and
     `.obsidian/` beside the notes, and a note the student deleted cited back to
     them as current is worse than one never ingested. Only directories -- a
     note named `.draft.md` is still a note. And Word's lock files, above.
 
-    Nothing checks `is_file`. Anything bearing a note's suffix that turns out
-    not to be readable as one -- a directory somebody named `assets.docx`, or
-    a note locked, mid-sync or deleted between this walk and the read -- comes
-    back as an ExtractionError naming it, which is the report the corpus owner
-    can act on. Filtering it out here would make the same file vanish from the
-    run without a word.
+    Nothing checks `is_file`. Anything bearing a readable suffix that turns out
+    not to be readable after all -- a directory somebody named `assets.docx`,
+    or a file locked, mid-sync or deleted between this walk and the read --
+    comes back as an ExtractionError naming it, which is the report the corpus
+    owner can act on. Filtering it out here would make the same file vanish
+    from the run without a word.
 
     Sorted on the relative path rather than on Path, so the report reads in the
     same order everywhere -- Path comparison case-folds on Windows and does not
     on POSIX.
     """
-    notes = (
+    candidates = (
         (path.relative_to(folder).as_posix(), path)
         for path in folder.rglob("*")
-        if path.suffix.lower() in NOTE_SUFFIXES
+        if path.suffix.lower() in DOCUMENT_SUFFIXES
     )
     return sorted(
         (relative, path)
-        for relative, path in notes
+        for relative, path in candidates
         if not any(segment.startswith(".") for segment in relative.split("/")[:-1])
         and not path.name.startswith(_WORD_LOCK_PREFIX)
     )
@@ -236,6 +259,8 @@ def ingest_folder(
     language: str = "zh-tw",
     min_tokens: int = MIN_SECTION_TOKENS,
     max_tokens: int = MAX_SECTION_TOKENS,
+    window: int = WINDOW_TOKENS,
+    overlap: int = WINDOW_OVERLAP_TOKENS,
     corpus_root: Path = CORPUS_ROOT,
 ) -> IngestReport:
     folder = Path(folder)
@@ -257,7 +282,7 @@ def ingest_folder(
     failed: list[IngestFailure] = []
     found: set[str] = set()
 
-    for relative, path in _notes_beneath(folder):
+    for relative, path in _documents_beneath(folder):
         # The path below the corpus root, not below `folder`: identity belongs
         # to the file, not to how the run was invoked. Two same-named notes in
         # different folders -- last year's and this year's -- therefore stay two
@@ -292,6 +317,8 @@ def ingest_folder(
                 language=language,
                 min_tokens=min_tokens,
                 max_tokens=max_tokens,
+                window=window,
+                overlap=overlap,
             )
             (ingested if was_ingested else skipped).append(doc_id)
         except ExtractionError as error:
@@ -329,12 +356,14 @@ def _ingest_document(
     language: str,
     min_tokens: int,
     max_tokens: int,
+    window: int,
+    overlap: int,
 ) -> bool:
     """Ingest one Document; True if it was (re-)ingested, False if unchanged.
 
     Raises ExtractionError if its text is unusable, having written nothing.
     """
-    note = extract_note(path)
+    extracted = extract_document(path)
     # Built before the skip check rather than after it, so what is compared
     # against the registry is exactly what would be written to it -- the
     # Document cannot be skipped on one set of fields and stored with another.
@@ -346,16 +375,22 @@ def _ingest_document(
         source_path=source_path,
         language=language,
         # The extracted text, not the file's bytes -- which for Markdown is the
-        # same thing and for docx deliberately is not (ingestion/extraction.py
-        # says why).
-        content_hash=content_hash(note.text),
+        # same thing and for docx and PDF deliberately is not
+        # (ingestion/extraction.py says why).
+        content_hash=content_hash(extracted.text),
         ingested_at=datetime.date.today().isoformat(),
     )
 
     if registry.unchanged(document):
         return False
 
-    drafts = chunk_sections(note.sections, min_tokens=min_tokens, max_tokens=max_tokens)
+    drafts = _chunk(
+        extracted,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens,
+        window=window,
+        overlap=overlap,
+    )
     if not drafts:
         # Structurally readable but empty of prose -- a heading with no body,
         # or whitespace. Recording it as ingested would put a Document in the
@@ -384,3 +419,42 @@ def _ingest_document(
 
     registry.upsert(document)
     return True
+
+
+def _chunk(
+    extracted: ExtractedDocument,
+    *,
+    min_tokens: int,
+    max_tokens: int,
+    window: int,
+    overlap: int,
+) -> list[ChunkDraft]:
+    """The chunking path this Document's structure calls for (ADR-0007).
+
+    Routed on what the reader recovered rather than on the file's format or on
+    the Source type the run was invoked with. A format decides which structure
+    it can offer and the structure decides the path, so adding a reader for a
+    Source that has pages and no headings -- a fetched article, the next PDF
+    Source -- reaches the windowed path without a branch being added here.
+
+    Deliberately the only place the two paths are chosen between. A second
+    chooser somewhere downstream would be a second place a Document could be
+    cut by rules that do not fit it, and a Chunk cut by the wrong rules is
+    invisible in the answer it produces.
+    """
+    match extracted:
+        case StructuredDocument(sections=sections):
+            return chunk_sections(sections, min_tokens=min_tokens, max_tokens=max_tokens)
+        case UnstructuredDocument(extents=extents):
+            return chunk_windows(extents, window=window, overlap=overlap)
+        case _:
+            # A reader handing back a third shape is a bug here, not a bad
+            # Document -- but ExtractionError all the same, because falling
+            # through a match returns None, and the caller would report the
+            # Document as empty of prose rather than as something it could not
+            # chunk. Naming it is the difference between a report the corpus
+            # owner acts on and one they act on wrongly.
+            raise ExtractionError(
+                f"came back as {type(extracted).__name__}, which no chunking "
+                "path is stated over"
+            )

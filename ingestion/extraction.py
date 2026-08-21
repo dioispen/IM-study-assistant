@@ -1,12 +1,10 @@
-"""Recovering a note's text and its Sections from the file it arrived as
-(ADR-0006).
+"""Recovering a Document's text and its structure from the file it arrived as
+(ADR-0006, ADR-0007).
 
-A student's notes are not one file format, and which format a note happens to
-be saved in says nothing about what is in it. So ingestion routes on the
-format and nothing else: `.md` and `.docx` both have headings, so both are
-parsed into the Sections `core/chunking.py` states the structured rules over,
-and a mixed folder ingests in one run with no flag naming which is which
-(PLAN.md §第 3 週).
+A student's notes are not one file format, and which format something happens
+to be saved in says nothing about what is in it. So ingestion routes on the
+format and nothing else: a mixed folder ingests in one run with no flag naming
+which file is which (PLAN.md §第 3 週).
 
 Routing here rather than on Source type deliberately. Source type answers
 "whose words am I reading?" (CONTEXT.md) -- a note written by the student and a
@@ -15,13 +13,18 @@ format, and a note is a note whether it was saved as Markdown or as Word. Two
 different questions, and folding them together would make `--source-type note`
 a claim about a file extension.
 
-What a format does not get to decide is the chunking. Every reader here yields
-Sections and stops; the merge and split rules live in one place, so a docx note
-cannot chunk by rules that have drifted from the ones a Markdown note chunks by.
+What a format decides is which *structure* it can offer, and that is what
+picks the chunking path (ADR-0007). `.md` and `.docx` have headings, so they
+yield the Sections `core/chunking.py` states the structured rules over. A
+`.pdf` has pages and no headings a reader can trust, so it yields Extents for
+the windowed path -- a paper, and a PDF note with it, because the split is by
+chunking path and not by the word "note" (PLAN.md §5.1).
 
-Formats with no headings to split on -- PDF above all -- are not here. They
-need the windowed path, which is deferred with the other unstructured Sources
-(PLAN.md §五, issue #7); the split is by chunking path, not by the word "note".
+What a format does not get to decide is the chunking rules themselves. Every
+reader here yields one of those two shapes and stops; merging, splitting and
+windowing live in one place each, so a docx note cannot chunk by rules that
+have drifted from the ones a Markdown note chunks by, and a paper cannot be
+windowed by a size of its reader's own choosing.
 """
 
 import re
@@ -29,9 +32,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import docx
+import pymupdf
 from docx.table import Table
 
-from core.chunking import Section, parse_markdown_sections
+from core.chunking import Extent, Section, parse_markdown_sections
 
 
 class ExtractionError(Exception):
@@ -44,8 +48,12 @@ class ExtractionError(Exception):
 
 
 @dataclass(frozen=True)
-class ExtractedNote:
-    """One note as ingestion needs it: something to hash, and Sections to chunk.
+class StructuredDocument:
+    """A Document whose format told the reader where its author changed subject.
+
+    Sections for `chunk_sections`, and the only shape the structured rules can
+    be stated over: they are about headed prose, so a Document with no headings
+    cannot be handed to them and be chunked by anything but accident.
 
     `text` is what content_hash is taken over, and it is per-format on purpose
     (ADR-0006). Markdown's is the file's own text, because that is what every
@@ -61,6 +69,33 @@ class ExtractedNote:
 
     text: str
     sections: list[Section]
+
+
+@dataclass(frozen=True)
+class UnstructuredDocument:
+    """A Document whose format offers a place to cite but not a place to split.
+
+    Extents for `chunk_windows`. A PDF's pages are the case this exists for:
+    page 7 is a perfectly good answer to "where in the Document did this come
+    from?" and no answer at all to "where does the author change subject?", so
+    it names Chunks without bounding them.
+
+    `text` is the extracted rendering, for the reason a docx's is: a PDF's
+    bytes carry a creation timestamp and an object layout, so the same paper
+    saved twice is not the same file, and hashing it would re-embed a paper
+    whose words never moved.
+    """
+
+    text: str
+    extents: list[Extent]
+
+
+# What a reader hands back: the two structures a format can offer, and the
+# choice of chunking path with it. A union rather than one type with both
+# fields, so that "a Document is structured or it is not" is a question the
+# type answers -- ingestion/common.py matches on it -- rather than an invariant
+# every caller has to remember to check.
+ExtractedDocument = StructuredDocument | UnstructuredDocument
 
 
 # Word's built-in heading styles, by name ("Heading 2") or by style id
@@ -201,7 +236,88 @@ def _as_hashable_text(sections: list[Section]) -> str:
     )
 
 
-def _extract_markdown(path: Path) -> ExtractedNote:
+# How a page is cited. "p. 7" rather than a bare number, because a Locator is
+# written for a reader who wants to go look (CONTEXT.md) and a lone "7" beside
+# a heading path like "死結 › 偵測" reads as neither a page nor a section.
+def _page_locator(number: int) -> str:
+    return f"p. {number}"
+
+
+def _pdf_extents(path: Path) -> list[Extent]:
+    """The pages of a PDF, in order, one Extent each.
+
+    `get_text()` in the order the page lays its text out, with no sorting and
+    no attempt to find headings. A paper arrives two-column, and both of the
+    things a reader might do about that make it worse: sorting blocks by
+    position interleaves the two columns line by line, and inferring headings
+    from font size invents a Locator citing a place in the paper that is not
+    there. The page number is a citation that holds whatever the column order
+    turned out to be, which is why this path cites pages (ADR-0007). Extraction
+    quality on a real paper is still checked by hand before it is trusted
+    (PLAN.md §5.3).
+
+    Empty pages are kept rather than skipped, so a page number is the number
+    printed on the page. Renumbering past a full-page figure would shift every
+    Locator after it and cite the wrong page for the rest of the paper; the
+    empty Extent is dropped later by the chunker, which cites nothing it has
+    no text for.
+    """
+    try:
+        with pymupdf.open(str(path)) as document:
+            if document.needs_pass:
+                # Named rather than left to come back as a Document with no
+                # text: the two failures ask opposite things of the corpus
+                # owner. One wants OCR; this one wants the password they
+                # already have.
+                raise ExtractionError(
+                    "is password-protected, so its text cannot be read "
+                    "(save an unprotected copy into the corpus)"
+                )
+            extents = [
+                Extent(locator=_page_locator(number), text=page.get_text())
+                for number, page in enumerate(document, start=1)
+            ]
+    except ExtractionError:
+        raise
+    except Exception as error:
+        # Every exception, for the reason _docx_sections gives at length: what
+        # a malformed PDF raises is a fact about PyMuPDF's internals -- a
+        # FileDataError for a truncated sync, something else for a file that
+        # opens and then does not parse -- and guessing the list short costs
+        # the run every file after this one rather than costing it this one.
+        raise ExtractionError(f"is not a readable .pdf ({error})") from error
+
+    if not any(extent.text.strip() for extent in extents):
+        # A scanned paper: every page an image and not a word between them.
+        raise ExtractionError(
+            "has no text layer to extract (a scan needs OCR before it can be "
+            "ingested)"
+        )
+    return extents
+
+
+def _as_hashable_extents(extents: list[Extent]) -> str:
+    """Extents rendered as one string, for hashing and for nothing else.
+
+    Each page is written under its own Locator, so that the same words spread
+    across a different number of pages hash differently. They have to: every
+    Locator after the break has moved, and a hash blind to that leaves the
+    corpus citing page numbers the file no longer has, with no later run able
+    to detect it (ADR-0001).
+    """
+    return "\n\n".join(
+        f"[{extent.locator}]\n{extent.text.strip()}" for extent in extents
+    )
+
+
+def _extract_pdf(path: Path) -> UnstructuredDocument:
+    extents = _pdf_extents(path)
+    return UnstructuredDocument(
+        text=_as_hashable_extents(extents), extents=extents
+    )
+
+
+def _extract_markdown(path: Path) -> StructuredDocument:
     # read_text, not read_bytes().decode(): it translates line endings, so a
     # note's content_hash survives a CRLF-vs-LF checkout instead of the whole
     # corpus re-embedding once on a different machine.
@@ -209,34 +325,44 @@ def _extract_markdown(path: Path) -> ExtractedNote:
         raw = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ExtractionError(f"not valid utf-8 ({error.reason})") from error
-    return ExtractedNote(text=raw, sections=parse_markdown_sections(raw))
+    return StructuredDocument(text=raw, sections=parse_markdown_sections(raw))
 
 
-def _extract_docx(path: Path) -> ExtractedNote:
+def _extract_docx(path: Path) -> StructuredDocument:
     sections = _docx_sections(path)
-    return ExtractedNote(text=_as_hashable_text(sections), sections=sections)
+    return StructuredDocument(text=_as_hashable_text(sections), sections=sections)
 
 
-_EXTRACTORS = {".md": _extract_markdown, ".docx": _extract_docx}
+_EXTRACTORS = {
+    ".md": _extract_markdown,
+    ".docx": _extract_docx,
+    ".pdf": _extract_pdf,
+}
 
-# What the walk looks for. Lower-cased, and matched against a lower-cased
-# suffix, so a note saved as `NOTES.DOCX` is the same note on Windows and on
-# Linux rather than a Document that exists on one machine's corpus and not the
+# What the walk looks for: every format with a reader here, whichever shape
+# that reader hands back. Lower-cased, and matched against a lower-cased
+# suffix, so a file saved as `NOTES.DOCX` is the same Document on Windows and
+# on Linux rather than one that exists in one machine's corpus and not the
 # other's.
-NOTE_SUFFIXES = frozenset(_EXTRACTORS)
+DOCUMENT_SUFFIXES = frozenset(_EXTRACTORS)
 
 
-def extract_note(path: Path) -> ExtractedNote:
-    """One note's text and Sections, routed by the format its file is in.
+def extract_document(path: Path) -> ExtractedDocument:
+    """One Document's text and structure, routed by the format its file is in.
+
+    Which of the two shapes comes back is the format's answer to whether it
+    knows where the author changed subject, and it is what picks the chunking
+    path downstream.
 
     Raises ExtractionError, never anything a caller has to know a reader's
     library to catch.
     """
     extractor = _EXTRACTORS.get(path.suffix.lower())
     if extractor is None:
-        # The walk filters on NOTE_SUFFIXES, so reaching this is a bug rather
-        # than a bad note -- still ExtractionError, because the alternative is
-        # a traceback that costs the folder every note after this one.
+        # The walk filters on DOCUMENT_SUFFIXES, so reaching this is a bug
+        # rather than a bad Document -- still ExtractionError, because the
+        # alternative is a traceback that costs the folder every file after
+        # this one.
         raise ExtractionError(
             f"has no reader for {path.suffix or 'a file with no suffix'!r}"
         )
