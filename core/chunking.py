@@ -1,4 +1,4 @@
-"""Structured chunking for headed Markdown notes (PLAN.md §2.3, §4).
+"""Structured chunking for headed notes (PLAN.md §2.3, §4).
 
 Splits on headings and never straddles one. An undersized section is merged
 into a neighboring section instead of becoming its own tiny Chunk -- forward
@@ -11,6 +11,16 @@ split into multiple Chunks that all share that one Locator.
 Sized and split by core/tokenization.py, so the rules above hold for a Chinese
 note as they do for an English one. A Chunk's text is a verbatim span of the
 Document -- nothing here reflows it.
+
+Headings are Markdown's `#` in a `.md` note and a paragraph's style in a
+`.docx` one, so what the chunking rules are stated over is a Section -- a
+heading path and the body beneath it -- rather than a syntax. Parsing a format
+into Sections and chunking them are two jobs: `parse_markdown_sections` does
+the first for Markdown, other formats do it for themselves
+(ingestion/extraction.py), and every one of them reaches the same
+`chunk_sections`. One structured path, one place the rules live -- a note that
+arrives as docx cannot chunk by rules that have drifted from the ones a note
+that arrives as Markdown chunks by.
 """
 
 import re
@@ -30,34 +40,53 @@ class ChunkDraft:
     text: str
 
 
-@dataclass
-class _Section:
-    heading_path: list[str]
-    body_lines: list[str]
+@dataclass(frozen=True)
+class Section:
+    """One heading's worth of a Document: where it sits, and what is under it.
+
+    `heading_path` runs from the outermost heading down to the one that opened
+    this section, so its length is that heading's level and its join is the
+    Locator. Empty for text that precedes any heading, which is a Chunk with an
+    empty Locator rather than a Chunk with none.
+
+    `body` is the prose alone, headings excluded -- a heading is what a Chunk is
+    cited by, not text the Chunk repeats.
+    """
+
+    heading_path: tuple[str, ...]
+    body: str
 
     @property
     def locator(self) -> str:
         return LOCATOR_SEPARATOR.join(self.heading_path)
 
 
-def _parse_sections(text: str) -> list[_Section]:
-    sections: list[_Section] = []
+def parse_markdown_sections(text: str) -> list[Section]:
+    """Markdown's ATX headings as Sections, in document order.
+
+    A section whose body is entirely whitespace is dropped: a heading with
+    nothing under it is a place in the Document, not a span of it, and it has
+    no text to embed. The heading still shows up in the path of everything
+    nested beneath it, since the path is built from the heading stack rather
+    than from the sections that survived.
+    """
+    sections: list[tuple[tuple[str, ...], list[str]]] = [((), [])]
     stack: list[str] = []
-    current = _Section(heading_path=[], body_lines=[])
-    sections.append(current)
 
     for line in text.splitlines():
         match = _HEADING_RE.match(line)
         if match:
             level = len(match.group(1))
-            heading = match.group(2)
-            stack[level - 1 :] = [heading]
-            current = _Section(heading_path=list(stack), body_lines=[])
-            sections.append(current)
+            stack[level - 1 :] = [match.group(2)]
+            sections.append((tuple(stack), []))
         else:
-            current.body_lines.append(line)
+            sections[-1][1].append(line)
 
-    return [s for s in sections if "\n".join(s.body_lines).strip()]
+    return [
+        Section(heading_path=path, body=body)
+        for path, lines in sections
+        if (body := "\n".join(lines).strip())
+    ]
 
 
 def _split_oversized(text: str, max_tokens: int) -> list[str]:
@@ -79,15 +108,16 @@ def _split_oversized(text: str, max_tokens: int) -> list[str]:
     ]
 
 
-def chunk_markdown(text: str, min_tokens: int, max_tokens: int) -> list[ChunkDraft]:
-    sections = _parse_sections(text)
-
+def chunk_sections(
+    sections: list[Section], min_tokens: int, max_tokens: int
+) -> list[ChunkDraft]:
+    """The merge-and-split rules of this module's docstring, over any format's
+    Sections."""
     chunks: list[ChunkDraft] = []
     pending = ""
 
     for section in sections:
-        body = "\n".join(section.body_lines).strip()
-        combined = f"{pending}\n\n{body}".strip() if pending else body
+        combined = f"{pending}\n\n{section.body}".strip() if pending else section.body
 
         if count_tokens(combined) < min_tokens:
             pending = combined

@@ -1,5 +1,20 @@
 from config import MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
-from core.chunking import chunk_markdown
+from core.chunking import chunk_sections, parse_markdown_sections
+
+
+def chunk_markdown(text: str, min_tokens: int, max_tokens: int):
+    """The two halves of the structured path, composed as this module reads it.
+
+    Every rule below is about headed prose rather than about `#`, so each test
+    states one over a Markdown document and reads the Chunks back. Production
+    parses each format into Sections itself (ingestion/extraction.py) and
+    nothing there needs this pairing, which is why it lives here rather than
+    beside them.
+    """
+    return chunk_sections(
+        parse_markdown_sections(text), min_tokens=min_tokens, max_tokens=max_tokens
+    )
+
 
 NORMAL = "word " * 20  # 20 tokens: within [10, 30] for most tests below
 

@@ -4,6 +4,7 @@ from core.embedder import FakeEmbedder
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
 from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
+from tests.docx_fixture import BODY, resave_untouched, write_docx
 
 
 class CountingEmbedder:
@@ -642,7 +643,7 @@ def test_a_document_that_fails_extraction_is_reported_and_the_run_continues(tmp_
 def test_a_document_that_cannot_be_opened_is_reported_and_the_run_continues(tmp_path):
     # A directory matching *.md is the portable stand-in for the real cases --
     # a note locked by an editor, mid-sync, or deleted since the glob. All
-    # reach _extract_text as OSError, and none should cost the folder the
+    # reach extract_note as OSError, and none should cost the folder the
     # notes that come after it.
     folder = tmp_path / "dsa"
     folder.mkdir()
@@ -708,3 +709,204 @@ def test_the_report_counts_ingested_skipped_and_failed(tmp_path):
 
     assert (len(report.ingested), len(report.skipped), len(report.failed)) == (1, 1, 1)
     assert report.summary() == "Ingested 1, skipped 1 unchanged, retired 0, failed 1."
+
+
+# Mixed formats. Everything above is Markdown, which is how "the walk looks for
+# *.md" survived a green suite: a corpus owner pointing ingestion at a folder
+# of Word notes was told "Ingested 0" and nothing was wrong. These pin that the
+# walk routes by format, that one bad file in either format costs the run only
+# itself, and that both formats reach the registry from a single run (#9).
+
+ZH_LAYERING_NOTE = (
+    "# OSI 參考模型\n\n## 分層架構\n\n應用層之下依序是傳輸層、網路層與連結層。"
+)
+ZH_LAYERING_BODY = "應用層之下依序是傳輸層、網路層與連結層。"
+
+
+def test_a_mixed_folder_ingests_both_formats_in_one_run(tmp_path):
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "osi_model.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
+    write_docx(
+        folder / "tcp_handshake.docx",
+        [
+            ("Heading 1", "傳輸控制協定"),
+            ("Heading 2", "三向交握"),
+            (BODY, "用戶端先送出 SYN 封包，伺服端回覆 SYN-ACK，用戶端再送出 ACK。"),
+        ],
+    )
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert sorted(report.ingested) == sorted(
+        [
+            derive_doc_id("network/osi_model.md"),
+            derive_doc_id("network/tcp_handshake.docx"),
+        ]
+    )
+    assert {doc.source_path for doc in registry.list()} == {
+        "network/osi_model.md",
+        "network/tcp_handshake.docx",
+    }
+
+
+def test_a_docx_note_in_a_subfolder_is_ingested_at_its_own_depth(tmp_path):
+    # The nesting rules and the format routing are separate walks' worth of
+    # logic, and a docx reader bolted onto a flat glob would pass every test
+    # above while a Word note two folders down went unread.
+    folder = tmp_path / "mis"
+    write_docx(
+        folder / "流程管理" / "塑模" / "bpmn.docx",
+        [
+            ("Heading 1", "BPMN"),
+            ("Heading 2", "閘道"),
+            (BODY, "閘道標示流程在此分支或匯流，依條件決定後續路徑。"),
+        ],
+    )
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "mis", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert report.ingested == [derive_doc_id("mis/流程管理/塑模/bpmn.docx")]
+
+
+def test_a_malformed_docx_is_reported_and_the_rest_of_the_run_proceeds(tmp_path):
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "broken.docx").write_bytes(b"not a Word package at all")
+    (folder / "readable.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert report.ingested == [derive_doc_id("network/readable.md")]
+    [failure] = report.failed
+    assert failure.source_path == "network/broken.docx"
+    assert "broken.docx" in failure.warning()
+    assert registry.get(failure.doc_id) is None
+
+
+def test_a_word_lock_file_is_not_read_as_a_note(tmp_path):
+    # Word leaves a `~$`-prefixed stub beside a note it has open, and that stub
+    # is not a Word package. Walking it would put a failure in every run for as
+    # long as the note is open -- a warning the corpus owner learns to ignore,
+    # which is the one thing a per-file warning cannot afford to become.
+    folder = tmp_path / "network"
+    folder.mkdir()
+    write_docx(
+        folder / "osi_model.docx",
+        [("Heading 1", "OSI 參考模型"), ("Heading 2", "分層架構"), (BODY, ZH_LAYERING_BODY)],
+    )
+    (folder / "~$osi_model.docx").write_bytes(b"\x00\x01 Word lock file")
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert report.failed == []
+    assert report.ingested == [derive_doc_id("network/osi_model.docx")]
+
+
+def test_a_file_of_no_readable_format_is_neither_ingested_nor_reported(tmp_path):
+    # A vault holds images, PDFs and exports beside the notes. None of them is
+    # a note the structured path can read, and none of them is a broken note
+    # either -- warning about each one every run would bury the warnings that
+    # are about notes. PDF joins the walk with the windowed path (#7).
+    folder = tmp_path / "network"
+    folder.mkdir()
+    (folder / "diagram.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (folder / "scan.pdf").write_bytes(b"%PDF-1.7")
+    (folder / "osi_model.md").write_text(ZH_LAYERING_NOTE, encoding="utf-8")
+    registry, store = _registry_and_store(tmp_path)
+
+    report = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert report.ingested == [derive_doc_id("network/osi_model.md")]
+    assert report.failed == []
+
+
+def test_reingesting_an_unchanged_docx_note_does_no_embedding_work(tmp_path):
+    folder = tmp_path / "network"
+    write_docx(
+        folder / "osi_model.docx",
+        [("Heading 1", "OSI 參考模型"), ("Heading 2", "分層架構"), (BODY, ZH_LAYERING_BODY)],
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = CountingEmbedder()
+
+    _ingest(folder, "network", registry, store, embedder, max_tokens=200)
+    work_after_first_run = embedder.texts_embedded
+    second = _ingest(folder, "network", registry, store, embedder, max_tokens=200)
+
+    assert second.skipped == [derive_doc_id("network/osi_model.docx")]
+    assert embedder.texts_embedded == work_after_first_run
+
+
+def test_resaving_a_docx_without_editing_it_does_not_re_embed_it(tmp_path):
+    # The docx counterpart of the CRLF test above. Opening a note in Word and
+    # closing it rewrites the package, and a hash over the file's bytes would
+    # read that as a changed note -- re-embedding a corpus every time its owner
+    # opened one of its notes to read it.
+    folder = tmp_path / "network"
+    note = write_docx(
+        folder / "osi_model.docx",
+        [("Heading 1", "OSI 參考模型"), ("Heading 2", "分層架構"), (BODY, ZH_LAYERING_BODY)],
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = CountingEmbedder()
+
+    _ingest(folder, "network", registry, store, embedder, max_tokens=200)
+    work_after_first_run = embedder.texts_embedded
+    resave_untouched(note, note)
+    second = _ingest(folder, "network", registry, store, embedder, max_tokens=200)
+
+    assert second.skipped == [derive_doc_id("network/osi_model.docx")]
+    assert embedder.texts_embedded == work_after_first_run
+
+
+def test_editing_a_docx_note_replaces_its_chunks(tmp_path):
+    folder = tmp_path / "network"
+    note = folder / "osi_model.docx"
+    write_docx(
+        note,
+        [("Heading 1", "OSI 參考模型"), ("Heading 2", "分層架構"), (BODY, ZH_LAYERING_BODY)],
+    )
+    registry, store = _registry_and_store(tmp_path)
+    doc_id = derive_doc_id("network/osi_model.docx")
+
+    _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+    write_docx(
+        note,
+        [
+            ("Heading 1", "OSI 參考模型"),
+            ("Heading 2", "封裝"),
+            (BODY, "資料往下傳遞時逐層加上標頭，往上則逐層拆解。"),
+        ],
+    )
+    second = _ingest(folder, "network", registry, store, FakeEmbedder(), max_tokens=200)
+
+    assert second.ingested == [doc_id]
+    stored = store.collection.get(where={"doc_id": doc_id})
+    assert {m["locator"] for m in stored["metadatas"]} == {"OSI 參考模型 › 封裝"}
+    assert not any("連結層" in text for text in stored["documents"])
+
+
+def test_a_docx_with_headings_and_no_prose_is_reported_as_failed(tmp_path):
+    # An ideographic space is whitespace, so this note has headings and no
+    # prose -- the shape the Markdown path already reports rather than
+    # registering a Document that contributes no Chunk to any answer.
+    folder = tmp_path / "network"
+    write_docx(
+        folder / "empty.docx",
+        [("Heading 1", "網路"), ("Heading 2", "概述"), (BODY, "　　")],
+    )
+    registry, store = _registry_and_store(tmp_path)
+    embedder = CountingEmbedder()
+
+    report = _ingest(folder, "network", registry, store, embedder, max_tokens=200)
+
+    assert report.ingested == []
+    [failure] = report.failed
+    assert failure.source_path == "network/empty.docx"
+    assert "chunk" in failure.reason.lower()
+    assert embedder.calls == 0

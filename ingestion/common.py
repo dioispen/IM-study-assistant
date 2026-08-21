@@ -1,6 +1,11 @@
-"""Ingests a folder of Markdown notes -- every one beneath it, at any depth
-outside a dot-prefixed directory -- into the Document registry and Chunk store:
+"""Ingests a folder of notes -- every one beneath it, at any depth outside a
+dot-prefixed directory -- into the Document registry and Chunk store:
 content-hash skip (ADR-0001), structured chunking, batch embedding.
+
+Markdown and Word notes ingest side by side in one run, routed by file format
+alone (ingestion/extraction.py) and never by a flag on the invocation: the
+corpus owner points ingestion at the folder their notes are in, and a note is a
+note whichever program wrote it.
 
 The folder is where the run starts, not what a Document is named by: identity
 is the path below `corpus_root` (config.py's CORPUS_ROOT, which says why).
@@ -22,19 +27,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import CORPUS_ROOT, MAX_SECTION_TOKENS, MIN_SECTION_TOKENS
-from core.chunking import chunk_markdown
+from core.chunking import chunk_sections
 from core.embedder import Embedder
 from core.registry import Document, Registry, content_hash, derive_doc_id
 from core.store import ChunkRecord, VectorStore
-
-
-class ExtractionError(Exception):
-    """A Document's text could not be recovered in a usable form.
-
-    Raised per Document and caught by the run, never propagated out of
-    `ingest_folder` -- one unreadable file must not cost the corpus every file
-    after it in the walk.
-    """
+from ingestion.extraction import NOTE_SUFFIXES, ExtractionError, extract_note
 
 
 class OutsideCorpusRoot(Exception):
@@ -101,44 +98,55 @@ def _derive_title(path: Path) -> str:
     return path.stem.replace("_", " ").replace("-", " ").strip()
 
 
-def _extract_text(path: Path) -> str:
-    # read_text, not read_bytes().decode(): it translates line endings, so a
-    # note's content_hash survives a CRLF-vs-LF checkout instead of the whole
-    # corpus re-embedding once on a different machine.
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as error:
-        raise ExtractionError(f"not valid utf-8 ({error.reason})") from error
-    except OSError as error:
-        # Locked by an editor, mid-sync, deleted since the glob -- per-file
-        # accidents, and no reason to cost the folder every note after this one.
-        raise ExtractionError(f"could not be read ({error.strerror or error})") from error
+# The stub Word leaves beside a note it has open. It carries the note's name
+# and the .docx suffix and is not a Word package, so walking it would report a
+# failure on every run for as long as the note is open -- a warning the corpus
+# owner learns to ignore, which is the one thing a per-file warning cannot
+# afford to become. Skipped rather than failed, because nothing is wrong.
+_WORD_LOCK_PREFIX = "~$"
 
 
 def _notes_beneath(folder: Path) -> list[tuple[str, Path]]:
-    """Every Markdown note beneath `folder`, as (path relative to it, path).
+    """Every note beneath `folder`, as (path relative to it, path).
 
     The whole tree, not one flat level: a student's notes live in subfolders,
     and one that is never read is not a failure anyone sees -- it is a hole in
     the corpus that surfaces months later as an abstention on a question they
     know they wrote notes about.
 
-    Dot-prefixed directories are the one exclusion. A note vault keeps
-    `.trash/` and `.obsidian/` beside the notes, and a note the student deleted
-    cited back to them as current is worse than one never ingested. Only
-    directories: a note named `.draft.md` is still a note.
+    Every readable format, not one: a mixed `.md` and `.docx` folder is what a
+    student's notes actually look like, and NOTE_SUFFIXES is what says which
+    formats the structured path can read. Matched case-insensitively, so
+    `NOTES.DOCX` is the same note on Windows and on Linux -- `rglob` case-folds
+    on one and not the other, and a corpus that ingests differently per machine
+    would derive doc_ids that exist on one and not the other.
+
+    Two exclusions. Dot-prefixed directories: a note vault keeps `.trash/` and
+    `.obsidian/` beside the notes, and a note the student deleted cited back to
+    them as current is worse than one never ingested. Only directories -- a
+    note named `.draft.md` is still a note. And Word's lock files, above.
+
+    Nothing checks `is_file`. Anything bearing a note's suffix that turns out
+    not to be readable as one -- a directory somebody named `assets.docx`, or
+    a note locked, mid-sync or deleted between this walk and the read -- comes
+    back as an ExtractionError naming it, which is the report the corpus owner
+    can act on. Filtering it out here would make the same file vanish from the
+    run without a word.
 
     Sorted on the relative path rather than on Path, so the report reads in the
     same order everywhere -- Path comparison case-folds on Windows and does not
     on POSIX.
     """
     notes = (
-        (path.relative_to(folder).as_posix(), path) for path in folder.rglob("*.md")
+        (path.relative_to(folder).as_posix(), path)
+        for path in folder.rglob("*")
+        if path.suffix.lower() in NOTE_SUFFIXES
     )
     return sorted(
         (relative, path)
         for relative, path in notes
         if not any(segment.startswith(".") for segment in relative.split("/")[:-1])
+        and not path.name.startswith(_WORD_LOCK_PREFIX)
     )
 
 
@@ -326,7 +334,7 @@ def _ingest_document(
 
     Raises ExtractionError if its text is unusable, having written nothing.
     """
-    raw = _extract_text(path)
+    note = extract_note(path)
     # Built before the skip check rather than after it, so what is compared
     # against the registry is exactly what would be written to it -- the
     # Document cannot be skipped on one set of fields and stored with another.
@@ -337,14 +345,17 @@ def _ingest_document(
         source_type=source_type,
         source_path=source_path,
         language=language,
-        content_hash=content_hash(raw),
+        # The extracted text, not the file's bytes -- which for Markdown is the
+        # same thing and for docx deliberately is not (ingestion/extraction.py
+        # says why).
+        content_hash=content_hash(note.text),
         ingested_at=datetime.date.today().isoformat(),
     )
 
     if registry.unchanged(document):
         return False
 
-    drafts = chunk_markdown(raw, min_tokens=min_tokens, max_tokens=max_tokens)
+    drafts = chunk_sections(note.sections, min_tokens=min_tokens, max_tokens=max_tokens)
     if not drafts:
         # Structurally readable but empty of prose -- a heading with no body,
         # or whitespace. Recording it as ingested would put a Document in the

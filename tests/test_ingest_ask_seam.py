@@ -1,9 +1,10 @@
-"""Seam tests for the walking skeleton: ingest a fixture corpus of Markdown
-notes, then ask questions against it. Fully offline (FakeEmbedder,
-FakeGenerator) and asserts only on retrieved doc_ids and Locators -- never on
-generated text (ADR-0002).
+"""Seam tests for the walking skeleton: ingest a fixture corpus of notes --
+Markdown, and Word beside it -- then ask questions against it. Fully offline
+(FakeEmbedder, FakeGenerator) and asserts only on retrieved doc_ids and
+Locators -- never on generated text (ADR-0002).
 """
 
+import re
 import shutil
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from core.generator import FakeGenerator
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
 from ingestion.common import ingest_folder
+from tests.docx_fixture import BODY, corrupt_a_part, write_docx
 
 FIXTURES = Path(__file__).parent / "fixtures" / "notes"
 
@@ -629,3 +631,228 @@ def test_a_question_the_corpus_covers_still_answers_under_the_same_gate(tmp_path
     assert not answer.abstained
     assert answer.evidence[0].doc_id == SCHEDULING_ID
 
+
+# Mixed-format corpus. Every fixture above is Markdown, which is how "the walk
+# looks for *.md" survived a green suite: a student whose notes are Word files
+# was told "Ingested 0" and nothing was wrong. These ingest a folder holding
+# both formats in one run, at the thresholds config.py ships, and read the
+# Locators back through `ask` -- the entry point a citation actually reaches
+# the reader through (#9).
+#
+# The docx fixtures are written at test time rather than committed, for the
+# reason docs/corpus-sources.md gives: a committed fixture has to be reviewable
+# in a diff, and a .docx is a zip. See tests/docx_fixture.py.
+
+DOCX_HANDSHAKE_ID = derive_doc_id("network/tcp_handshake.docx")
+DOCX_OSI_ID = derive_doc_id("network/osi_model.docx")
+
+
+def _as_docx_blocks(markdown: str) -> list[tuple[str | None, str]]:
+    """A Markdown fixture's headings and prose as the Word note saying the same.
+
+    Written off the committed `.md` fixtures rather than typed out again, so the
+    two formats really are carrying the same words -- which is what lets the
+    tests below assert that a note chunks and cites the same either way rather
+    than merely that each format chunks into something.
+    """
+    blocks: list[tuple[str | None, str]] = []
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if match := re.match(r"^(#{1,6})\s+(.*\S)\s*$", stripped):
+            blocks.append((f"Heading {len(match.group(1))}", match.group(2)))
+        else:
+            blocks.append((BODY, stripped))
+    return blocks
+
+
+def _ingest_mixed(tmp_path):
+    """One `network` folder holding the same two notes as `.md` and as `.docx`,
+    ingested in a single run at the thresholds config.py ships.
+
+    Four Documents from one walk, two per format. Kept in its own registry and
+    store for the reason `_ingest_with_chinese` gives at length: the gate tests
+    read distances off `_ingest_corpus`'s store, and Chinese Chunks sized for
+    the configured thresholds pull the out-of-corpus trap inside GATE_TAU.
+    """
+    corpus = tmp_path / "corpus"
+    folder = corpus / "network"
+    folder.mkdir(parents=True)
+    for source in sorted((FIXTURES / "network").glob("*.md")):
+        markdown = source.read_text(encoding="utf-8")
+        (folder / source.name).write_text(markdown, encoding="utf-8")
+        write_docx(folder / f"{source.stem}.docx", _as_docx_blocks(markdown))
+
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    embedder = FakeEmbedder()
+    report = ingest_folder(
+        folder=folder,
+        domain="network",
+        source_type="note",
+        registry=registry,
+        store=store,
+        embedder=embedder,
+        corpus_root=corpus,
+    )
+    return registry, store, embedder, report
+
+
+def test_a_mixed_format_folder_ingests_every_note_in_one_run(tmp_path):
+    # One run, no flag naming a format: the walk routes each file by its own
+    # suffix, so the corpus owner points ingestion at the folder their notes
+    # are in and every readable note lands.
+    registry, _store, _embedder, report = _ingest_mixed(tmp_path)
+
+    assert set(report.ingested) == {
+        HANDSHAKE_ID,
+        OSI_ID,
+        DOCX_HANDSHAKE_ID,
+        DOCX_OSI_ID,
+    }
+    assert report.failed == []
+    assert {doc.source_path for doc in registry.list()} == {
+        "network/tcp_handshake.md",
+        "network/tcp_handshake.docx",
+        "network/osi_model.md",
+        "network/osi_model.docx",
+    }
+
+
+def test_a_docx_note_chunks_exactly_as_the_same_note_in_markdown_does(tmp_path):
+    # The structured path, asserted as one path rather than two: same headings,
+    # same prose, same thresholds, so the same Locators over the same number of
+    # Chunks. A docx reader that grew its own merge or split rules would show
+    # up here even while every count it produced looked plausible on its own.
+    _registry, store, _embedder, _report = _ingest_mixed(tmp_path)
+
+    for markdown_id, docx_id in (
+        (HANDSHAKE_ID, DOCX_HANDSHAKE_ID),
+        (OSI_ID, DOCX_OSI_ID),
+    ):
+        markdown = store.collection.get(where={"doc_id": markdown_id})
+        word = store.collection.get(where={"doc_id": docx_id})
+
+        assert len(word["ids"]) == len(markdown["ids"])
+        assert [m["locator"] for m in _in_ordinal_order(word)] == [
+            m["locator"] for m in _in_ordinal_order(markdown)
+        ]
+
+
+def _in_ordinal_order(result):
+    return [meta for meta, _ in sorted(
+        zip(result["metadatas"], result["documents"]), key=lambda pair: pair[0]["ordinal"]
+    )]
+
+
+def test_a_docx_note_is_cited_by_its_heading_path_through_ask(tmp_path):
+    # The acceptance criterion in the shape the reader meets it: a question
+    # answered from a Word note comes back citing a heading path, not a page,
+    # an offset or the file's name.
+    _registry, store, embedder, _report = _ingest_mixed(tmp_path)
+
+    answer = ask(
+        ZH_HANDSHAKE_QUESTION,
+        embedder,
+        store,
+        FakeGenerator(),
+        top_k=5,
+        distance_threshold=PASS_EVERYTHING,
+        # One Chunk per Document, so the Word note contributes its best match
+        # and the assertion below is about that Chunk rather than about
+        # whichever of its several Chunks happened to come back first.
+        max_chunks_per_document=1,
+    )
+
+    [from_docx] = [c for c in answer.evidence if c.doc_id == DOCX_HANDSHAKE_ID]
+    assert from_docx.locator == "傳輸控制協定 › 三向交握"
+    assert from_docx.domain == "network"
+    assert from_docx.source_type == "note"
+
+
+def test_a_docx_notes_oversized_section_splits_under_one_heading_path(tmp_path):
+    # 三向交握 is the section sized to exceed MAX_SECTION_TOKENS, and a whitespace
+    # split would never read it as oversized at all -- so this is the CJK token
+    # measure and the split branch reached through the docx reader.
+    _registry, store, _embedder, _report = _ingest_mixed(tmp_path)
+
+    texts = _texts_under(store, DOCX_HANDSHAKE_ID, "傳輸控制協定 › 三向交握")
+
+    assert len(texts) == 2
+    assert "".join(texts).startswith("用戶端先送出 SYN 封包")
+    assert not any("四次揮手" in text for text in texts)
+
+
+def test_a_docx_notes_undersized_section_merges_into_its_neighbour(tmp_path):
+    # 概述 is below MIN_SECTION_TOKENS, so it must not be citable on its own.
+    _registry, store, _embedder, _report = _ingest_mixed(tmp_path)
+
+    assert _texts_under(store, DOCX_OSI_ID, "OSI 參考模型 › 概述") == []
+    [layering] = _texts_under(store, DOCX_OSI_ID, "OSI 參考模型 › 分層架構")
+    assert "分層的目的是解耦" in layering
+
+
+def test_a_malformed_docx_is_named_in_the_run_and_costs_the_run_nothing_else(tmp_path):
+    # The run report contract from #4, over a format whose files fail in ways
+    # a text note cannot: a truncated sync, a renamed zip, a file Word itself
+    # would refuse to open.
+    corpus = tmp_path / "corpus"
+    folder = corpus / "network"
+    folder.mkdir(parents=True)
+    shutil.copy(FIXTURES / "network" / "osi_model.md", folder / "osi_model.md")
+    # A package that opens and then does not parse, rather than bytes that are
+    # not a zip at all: the shape that takes the whole walk down if the reader
+    # lets its parser's own exception out, costing the corpus every note after
+    # this one and the retirement sweep with them.
+    corrupt_a_part(
+        write_docx(tmp_path / "intact.docx", [("Heading 1", "傳輸控制協定"), (BODY, "三向交握。")]),
+        folder / "tcp_handshake.docx",
+    )
+
+    registry = Registry(tmp_path / "documents.sqlite")
+    report = ingest_folder(
+        folder=folder,
+        domain="network",
+        source_type="note",
+        registry=registry,
+        store=VectorStore(path=tmp_path / "chroma"),
+        embedder=FakeEmbedder(),
+        corpus_root=corpus,
+    )
+
+    assert report.ingested == [OSI_ID]
+    [failure] = report.failed
+    assert failure.source_path == "network/tcp_handshake.docx"
+    assert "tcp_handshake.docx" in failure.warning()
+    assert report.summary() == "Ingested 1, skipped 0 unchanged, retired 0, failed 1."
+    assert registry.get(failure.doc_id) is None
+
+
+def test_reingesting_the_unchanged_mixed_corpus_skips_every_note(tmp_path):
+    # A format whose skip does not hold re-embeds its half of the corpus every
+    # run, which is invisible until the bill arrives.
+    corpus = tmp_path / "corpus"
+    folder = corpus / "network"
+    folder.mkdir(parents=True)
+    for source in sorted((FIXTURES / "network").glob("*.md")):
+        markdown = source.read_text(encoding="utf-8")
+        (folder / source.name).write_text(markdown, encoding="utf-8")
+        write_docx(folder / f"{source.stem}.docx", _as_docx_blocks(markdown))
+    registry = Registry(tmp_path / "documents.sqlite")
+    store = VectorStore(path=tmp_path / "chroma")
+    kwargs = dict(
+        folder=folder,
+        domain="network",
+        source_type="note",
+        registry=registry,
+        store=store,
+        embedder=FakeEmbedder(),
+        corpus_root=corpus,
+    )
+
+    first = ingest_folder(**kwargs)
+    second = ingest_folder(**kwargs)
+
+    assert second.ingested == []
+    assert sorted(second.skipped) == sorted(first.ingested)

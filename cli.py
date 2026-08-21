@@ -1,5 +1,5 @@
-"""Command-line entry point: ingest a folder of Markdown notes, or ask a
-question and get a cited answer with source cards."""
+"""Command-line entry point: ingest a folder of notes, or ask a question and
+get a cited answer with source cards."""
 
 import argparse
 import sys
@@ -177,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ingest_parser = subparsers.add_parser(
-        "ingest", help="Ingest a folder of Markdown notes"
+        "ingest", help="Ingest a folder of .md and .docx notes"
     )
     # No --corpus-root override, for the reason --distance-threshold has none:
     # a Document is identified by its path below one root, and a per-run root
@@ -186,7 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     # CORPUS_ROOT in config.py.
     ingest_parser.add_argument(
         "folder",
-        help="Folder of .md notes beneath the corpus root, including any in its subfolders",
+        help=(
+            "Folder of .md and .docx notes beneath the corpus root, including any "
+            "in its subfolders. Both formats ingest in one run, routed by the "
+            "file's own format"
+        ),
     )
     ingest_parser.add_argument("--domain", required=True, choices=DOMAINS)
     ingest_parser.add_argument("--source-type", default="note")
@@ -232,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    # Titles, Locators and source paths may contain non-ASCII (Markdown notes
+    # Titles, Locators and source paths may contain non-ASCII (notes
     # are zh-tw by default; Locators use "›"). Windows consoles often default
     # to a legacy codepage that can't encode either, so force UTF-8 on both
     # streams -- ingest failures name their file on stderr.
