@@ -21,8 +21,20 @@ _Avoid_: passage, segment, fragment
 **Locator**:
 The human-readable pointer to where in its Document a Chunk came from, written
 for a reader who wants to go look. Always present; its shape depends on what
-the Document offers — a heading path, a page, an anchor.
-_Avoid_: section, position, offset, citation
+the Document offers — a heading path, a page, an anchor. Never the thing it
+points at: a Section and an Extent are spans of text, and a Locator is only the
+name of where such a span sits. Naming this field for any one shape is what
+PLAN.md §2.3 rejected — under a field called `section`, a paper would cite
+nothing at all.
+_Avoid_: position, offset, citation
+
+**Section**:
+One heading's worth of a Document — the heading path that names it and the
+prose beneath it — in a Document whose format marks where its author changed
+subject. What a Chunk is cut from and cited by on the structured path, and,
+unlike an Extent, a boundary the chunking respects: a heading is the author
+saying "the subject changes here", so no Chunk straddles one.
+_Avoid_: chapter, part, block
 
 **Extent**:
 The stretch of a Document that one Locator names, in a Document whose format
@@ -30,7 +42,7 @@ offers somewhere to cite but nowhere to split — a page, an article's body. Wha
 a Chunk is cut _from_ and cited _by_ on the windowed path, and never a Chunk
 itself: several Chunks can start in one Extent, and one Chunk can run across
 two.
-_Avoid_: passage, page, block, unit
+_Avoid_: passage, segment, block, unit
 
 **Evidence**:
 The Chunks retrieved for one question and passed to generation, after any
