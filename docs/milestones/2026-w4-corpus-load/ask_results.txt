@@ -1,0 +1,335 @@
+##############################################################################
+# HAND-READ SAMPLE
+##############################################################################
+==============================================================================
+[intro-cs] 什麼是二補數（2's complement）?它相較於一補數有什麼優點?
+==============================================================================
+nearest_distance = 0.35235995054244995  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3524  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.3843  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.4048  [dsa] summary  ›  小結 › 重點回顧 › Q & A
+  d=0.4433  [dsa] summary  ›  小結 › 重點回顧 › Q & A
+  d=0.4567  [intro-cs] 05 codes and error detection  ›  數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+--- answer ---
+二補數（2's complement）是一種用於表示負數的編碼方式。在表示中，負零的二補數為 $0000 \; 0000$，這與正零相同，解決了正負零的歧義問題。此外，相比於一補數，二補數的優點在於不會存在正負零的歧義，並且在計算機中使用時，原碼和二補數之間的轉換可以通過相同的操作（先取反後加 1 或先減 1 後取反）實現。
+
+引用的chunk:
+- [1] 數字編碼 * › 原碼、一補數和二補數
+- [2] 數字編碼 * › 原碼、一補數和二補數
+- [3] 小結 › 重點回顧 › Q & A
+- [4] 小結 › 重點回顧 › Q & A
+--- cited Evidence cards ---
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - summary (note) — 小結 › 重點回顧 › Q & A
+  - summary (note) — 小結 › 重點回顧 › Q & A
+  - 05 codes and error detection (note) — 數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+
+==============================================================================
+[intro-cs] IEEE 754 單精度浮點數的 32 個位元是怎麼分配的?
+==============================================================================
+nearest_distance = 0.29557573795318604  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.2956  [intro-cs] 04 floating point  ›  浮點數表示 › 4-3 浮點數表示方法
+  d=0.3506  [intro-cs] 04 floating point  ›  浮點數表示 › 4-1 定點數與浮點數
+  d=0.3535  [dsa] number encoding  ›  數字編碼 * › 浮點數編碼
+  d=0.3800  [dsa] number encoding  ›  數字編碼 * › 浮點數編碼
+  d=0.3827  [intro-cs] 03 complement systems  ›  補數系統 › 3-5 利用超碼 (Excess Code) 表示正負數
+--- answer ---
+IEEE 754 單精度浮點數的 32 個位元分配如下：
+
+- 符號位 (s)：1 位
+- 指數位 (e)：8 位
+- 小數位 (f)：23 位
+
+總計 32 位元。這些位元的配置詳見於 [1] Title: 04 floating point, Locator: 浮點數表示 › 4-3 浮點數表示方法。
+--- cited Evidence cards ---
+  - 04 floating point (note) — 浮點數表示 › 4-3 浮點數表示方法
+  - 04 floating point (note) — 浮點數表示 › 4-1 定點數與浮點數
+  - number encoding (note) — 數字編碼 * › 浮點數編碼
+  - number encoding (note) — 數字編碼 * › 浮點數編碼
+  - 03 complement systems (note) — 補數系統 › 3-5 利用超碼 (Excess Code) 表示正負數
+
+==============================================================================
+[intro-cs] 機器指令週期分成哪幾個階段?每個階段做什麼?
+==============================================================================
+nearest_distance = 0.4513514041900635  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.4514  [intro-cs] 01 computer system  ›  計算機系統 (Computer System) › 1-2 機器指令的週期
+  d=0.4682  [intro-cs] 01 computer system  ›  計算機系統 (Computer System) › 1-5 CPU (Central Processing Unit)
+  d=0.5734  [dsa] iteration and recursion  ›  迭代與遞迴 › 迭代
+  d=0.5847  [intro-cs] 02 number systems  ›  數字系統 › 2-2 進制轉換
+  d=0.5919  [dsa] queue  ›  佇列 › 佇列典型應用
+--- answer ---
+機器指令週期分成五個階段，分別為：
+
+1. **取指令 (Fetch)**：依 PC 讀指令入 IR, PC 加一（主要暫存器：PC、IR、MAR、MBR）。
+2. **解碼 (Decode)**：CU 解讀 opcode 與定址欄位（主要暫存器：IR）。
+3. **取運算元 (Operand)**：依定址模式算出有效位址並讀值（主要暫存器：MAR、MBR）。
+4. **執行 (Execute)**：ALU 運算，或在單元間搬移資料（主要暫存器：ALU、ACC）。
+5. **寫回 (Write-back)**：把結果存回暫存器或記憶體（主要暫存器：ACC、MBR、MAR）。
+
+這些信息來自於第一個文獻的“計算機系統 › 1-2 機器指令的週期”。
+--- cited Evidence cards ---
+  - 01 computer system (note) — 計算機系統 (Computer System) › 1-2 機器指令的週期
+  - 01 computer system (note) — 計算機系統 (Computer System) › 1-5 CPU (Central Processing Unit)
+  - iteration and recursion (note) — 迭代與遞迴 › 迭代
+  - 02 number systems (note) — 數字系統 › 2-2 進制轉換
+  - queue (note) — 佇列 › 佇列典型應用
+
+==============================================================================
+[intro-cs] 漢明碼和單純的同位位元在錯誤處理能力上有什麼差別?
+==============================================================================
+nearest_distance = 0.304943323135376  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3049  [intro-cs] 05 codes and error detection  ›  數碼、文數字碼、錯誤偵測碼及更正碼 › 5-3 錯誤偵測及更正碼
+  d=0.3938  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.4289  [intro-cs] 03 complement systems  ›  補數系統 › 3-5 利用超碼 (Excess Code) 表示正負數
+  d=0.4602  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.4663  [intro-cs] 05 codes and error detection  ›  數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+--- answer ---
+漢明碼可以更正單一位元錯誤，而同位位元僅能偵測單一位元錯誤但無法定位。具體差異如下：
+
+- 漢明碼：更正單一位元錯誤，檢查位元置於 2 的次方位置（見[1] 05 codes and error detection, Locator: 5-3 錯誤偵測及更正碼）。
+- 同位位元 parity：偵測單一位元錯誤，但無法定位（見[1] 05 codes and error detection, Locator: 5-3 錯誤偵測及更正碼）。
+--- cited Evidence cards ---
+  - 05 codes and error detection (note) — 數碼、文數字碼、錯誤偵測碼及更正碼 › 5-3 錯誤偵測及更正碼
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - 03 complement systems (note) — 補數系統 › 3-5 利用超碼 (Excess Code) 表示正負數
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - 05 codes and error detection (note) — 數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+
+==============================================================================
+[intro-cs] 為什麼儲存體階層（storage hierarchy）能有效運作?
+==============================================================================
+nearest_distance = 0.34429365396499634  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3443  [intro-cs] 01 computer system  ›  計算機系統 (Computer System) › 1-4 Storage Hierarchy
+  d=0.3558  [dsa] ram and cache  ›  記憶體與快取 * › 計算機儲存裝置
+  d=0.3932  [dsa] classification of data structure  ›  資料結構分類 › 物理結構：連續與分散
+  d=0.4156  [dsa] ram and cache  ›  記憶體與快取 *
+  d=0.4616  [dsa] exercises  ›  練習 › 知識鞏固 › 邏輯順序怎樣存進記憶體
+--- answer ---
+儲存體階層能有效運作的原因是因為程式存取有區域性。時間區域性指的是剛用過的資料很快會再用，空間區域性則指存取位址集中在鄰近範圍。這使得常用資料能夠留在上層，從而使平均存取時間接近上層，成本則接近下層。這樣的設計方式確保了速度與成本的平衡，並提高了效率。 
+
+（來源: 01 computer system, 1-4 Storage Hierarchy）
+--- cited Evidence cards ---
+  - 01 computer system (note) — 計算機系統 (Computer System) › 1-4 Storage Hierarchy
+  - ram and cache (note) — 記憶體與快取 * › 計算機儲存裝置
+  - classification of data structure (note) — 資料結構分類 › 物理結構：連續與分散
+  - ram and cache (note) — 記憶體與快取 *
+  - exercises (note) — 練習 › 知識鞏固 › 邏輯順序怎樣存進記憶體
+
+==============================================================================
+[dsa] quicksort 和 merge sort 的取捨是什麼?
+==============================================================================
+nearest_distance = 0.42105913162231445  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.4211  [dsa] merge sort  ›  合併排序
+  d=0.4329  [dsa] quick sort  ›  快速排序
+  d=0.4476  [dsa] quick sort  ›  快速排序 › 遞迴深度最佳化
+  d=0.4929  [dsa] insertion sort  ›  插入排序
+  d=0.5093  [dsa] summary  ›  小結 › 重點回顧
+--- answer ---
+我不知道。
+--- cited Evidence cards ---
+  - merge sort (note) — 合併排序
+  - quick sort (note) — 快速排序
+  - quick sort (note) — 快速排序 › 遞迴深度最佳化
+  - insertion sort (note) — 插入排序
+  - summary (note) — 小結 › 重點回顧
+
+==============================================================================
+[dsa] 雜湊衝突有哪些解決方法?
+==============================================================================
+nearest_distance = 0.45554643869400024  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.4555  [dsa] hash collision  ›  雜湊衝突
+  d=0.4935  [dsa] summary  ›  小結 › 重點回顧
+  d=0.5255  [dsa] hash algorithm  ›  雜湊演算法
+  d=0.5465  [dsa] hash collision  ›  雜湊衝突 › 開放定址 › 多次雜湊
+  d=0.5499  [dsa] dp problem features  ›  動態規劃問題特性 › 無後效性
+--- answer ---
+雜湊衝突的解決方法包括：
+
+1. 改良雜湊表資料結構，使得雜湊表可以在出現雜湊衝突時正常工作。
+2. 僅在必要時，即當雜湊衝突比較嚴重時，才執行擴容操作。 
+
+這些方法被提到於[1] "hash collision" 的內容。
+--- cited Evidence cards ---
+  - hash collision (note) — 雜湊衝突
+  - summary (note) — 小結 › 重點回顧
+  - hash algorithm (note) — 雜湊演算法
+  - hash collision (note) — 雜湊衝突 › 開放定址 › 多次雜湊
+  - dp problem features (note) — 動態規劃問題特性 › 無後效性
+
+==============================================================================
+[dsa] AVL 樹是如何維持平衡的?
+==============================================================================
+nearest_distance = 0.2993704080581665  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.2994  [dsa] avl tree  ›  AVL 樹 * › AVL 樹常見術語
+  d=0.3433  [dsa] avl tree  ›  AVL 樹 * › AVL 樹旋轉
+  d=0.4385  [dsa] binary tree  ›  二元樹 › 常見二元樹型別 › 平衡二元樹
+  d=0.4610  [dsa] summary  ›  小結 › 重點回顧
+  d=0.5079  [dsa] searching algorithm revisited  ›  重識搜尋演算法 › 搜尋方法選取
+--- answer ---
+AVL 樹是通過“旋轉”操作來維持平衡的，這些旋轉操作在不影響二元樹的中序走訪序列的前提下，能夠使失衡節點重新恢復平衡。具體而言，當節點的平衡因子絕對值大於 1 時，會進行旋轉操作，這些操作包括右旋、左旋、先右旋再左旋及先左旋再右旋。這樣，AVL 樹可以在插入或刪除節點後從底向頂執行旋轉操作，以確保樹始終保持平衡。[2] (AVL 樹旋轉)
+--- cited Evidence cards ---
+  - avl tree (note) — AVL 樹 * › AVL 樹常見術語
+  - avl tree (note) — AVL 樹 * › AVL 樹旋轉
+  - binary tree (note) — 二元樹 › 常見二元樹型別 › 平衡二元樹
+  - summary (note) — 小結 › 重點回顧
+  - searching algorithm revisited (note) — 重識搜尋演算法 › 搜尋方法選取
+
+==============================================================================
+[dsa] 什麼是二元搜尋樹?它的查詢時間複雜度為何?
+==============================================================================
+nearest_distance = 0.27025938034057617  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.2703  [dsa] binary search tree  ›  二元搜尋樹 › 二元搜尋樹的效率
+  d=0.3173  [dsa] binary search recur  ›  分治搜尋策略
+  d=0.3204  [dsa] summary  ›  小結 › 重點回顧
+  d=0.3425  [dsa] binary search tree  ›  二元搜尋樹 › 二元搜尋樹的操作 › 查詢節點
+  d=0.3513  [dsa] binary search  ›  二分搜尋 › 優點與侷限性
+--- answer ---
+二元搜尋樹是一種高效的元素查詢資料結構，其查詢操作的時間複雜度為 $O(\log n)$。當二元搜尋樹退化為鏈結串列時，各項時間複雜度會劣化至 $O(n)$。這些資訊來自於 [3] 小結 › 重點回顧。
+--- cited Evidence cards ---
+  - binary search tree (note) — 二元搜尋樹 › 二元搜尋樹的效率
+  - binary search recur (note) — 分治搜尋策略
+  - summary (note) — 小結 › 重點回顧
+  - binary search tree (note) — 二元搜尋樹 › 二元搜尋樹的操作 › 查詢節點
+  - binary search (note) — 二分搜尋 › 優點與侷限性
+
+==============================================================================
+[dsa] 圖的 BFS 和 DFS 走訪有什麼不同?
+==============================================================================
+nearest_distance = 0.30560773611068726  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3056  [dsa] graph traversal  ›  圖的走訪 › 廣度優先走訪 › 演算法實現
+  d=0.3145  [dsa] graph traversal  ›  圖的走訪 › 廣度優先走訪 › 演算法實現
+  d=0.3233  [dsa] exercises  ›  練習 › 知識鞏固 › 一次 BFS 能訪問整張圖嗎
+  d=0.3784  [dsa] binary tree traversal  ›  二元樹走訪 › 層序走訪
+  d=0.3823  [dsa] binary tree traversal  ›  二元樹走訪 › 前序、中序、後序走訪
+--- answer ---
+我不知道。
+--- cited Evidence cards ---
+  - graph traversal (note) — 圖的走訪 › 廣度優先走訪 › 演算法實現
+  - graph traversal (note) — 圖的走訪 › 廣度優先走訪 › 演算法實現
+  - exercises (note) — 練習 › 知識鞏固 › 一次 BFS 能訪問整張圖嗎
+  - binary tree traversal (note) — 二元樹走訪 › 層序走訪
+  - binary tree traversal (note) — 二元樹走訪 › 前序、中序、後序走訪
+
+==============================================================================
+[dsa (scoped)] 堆積（heap）的插入操作是怎麼運作的?
+==============================================================================
+nearest_distance = 0.34964877367019653  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3496  [dsa] heap  ›  堆積 › 堆積的常用操作
+  d=0.3586  [dsa] build heap  ›  建堆積操作
+  d=0.3643  [dsa] heap sort  ›  堆積排序
+  d=0.3666  [dsa] heap  ›  堆積 › 堆積的實現 › 元素入堆積
+  d=0.3775  [dsa] stack  ›  堆疊
+--- answer ---
+堆積的插入操作是將給定元素 `val` 新增到堆積底部。之後，因為 `val` 可能大於堆積中其他元素，所以需要修復從插入節點到根節點的路徑上的各個節點，這個過程被稱為堆積化（heapify）。具體地，從入堆積的節點開始，從底至頂執行堆積化，通過比較插入節點與其父節點的值，如果插入節點更大，則交換兩者，再繼續執行此操作直到越過根節點或遇到無須交換的節點為止。
+
+參考來源: [heap | 堆積 › 堆積的實現 › 元素入堆積](4)
+--- cited Evidence cards ---
+  - heap (note) — 堆積 › 堆積的常用操作
+  - build heap (note) — 建堆積操作
+  - heap sort (note) — 堆積排序
+  - heap (note) — 堆積 › 堆積的實現 › 元素入堆積
+  - stack (note) — 堆疊
+
+##############################################################################
+# ABSTENTION PROBES  (ADR-0003 — layers scored separately, never summed)
+##############################################################################
+==============================================================================
+LAYER 1 — out-of-corpus trap
+Q: 什麼是 CRISPR-Cas9 基因編輯技術?
+==============================================================================
+nearest_distance = 0.7221083641052246  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.7221  [dsa] edit distance problem  ›  編輯距離問題
+  d=0.7301  [dsa] insertion sort  ›  插入排序
+  d=0.7330  [intro-cs] 05 codes and error detection  ›  數碼、文數字碼、錯誤偵測碼及更正碼 › 5-2 文數字碼
+  d=0.7486  [dsa] backtracking algorithm  ›  回溯演算法 › 優點與侷限性
+  d=0.7577  [dsa] contribution  ›  一起參與創作 › 內容微調 › 內容創作
+--- answer ---
+我不知道。
+--- cited Evidence cards ---
+  - edit distance problem (note) — 編輯距離問題
+  - insertion sort (note) — 插入排序
+  - 05 codes and error detection (note) — 數碼、文數字碼、錯誤偵測碼及更正碼 › 5-2 文數字碼
+  - backtracking algorithm (note) — 回溯演算法 › 優點與侷限性
+  - contribution (note) — 一起參與創作 › 內容微調 › 內容創作
+
+==============================================================================
+LAYER 2 — near-miss trap
+Q: 紅黑樹（red-black tree）的節點插入會做哪些變色與旋轉操作?
+==============================================================================
+nearest_distance = 0.3722788095474243  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3723  [dsa] avl tree  ›  AVL 樹 * › AVL 樹旋轉 › 右旋
+  d=0.3789  [dsa] avl tree  ›  AVL 樹 * › AVL 樹旋轉
+  d=0.4501  [dsa] binary tree  ›  二元樹 › 二元樹基本操作 › 插入與刪除節點
+  d=0.4582  [dsa] exercises  ›  練習 › 知識鞏固 › 從走訪序列拆分左右子樹
+  d=0.4597  [dsa] summary  ›  小結 › 重點回顧 › Q & A
+--- answer ---
+我不知道。
+--- cited Evidence cards ---
+  - avl tree (note) — AVL 樹 * › AVL 樹旋轉 › 右旋
+  - avl tree (note) — AVL 樹 * › AVL 樹旋轉
+  - binary tree (note) — 二元樹 › 二元樹基本操作 › 插入與刪除節點
+  - exercises (note) — 練習 › 知識鞏固 › 從走訪序列拆分左右子樹
+  - summary (note) — 小結 › 重點回顧 › Q & A
+
+==============================================================================
+LAYER 2 — near-miss trap (intro-cs)
+Q: 格雷碼（Gray code）要如何做兩數相加的運算?
+==============================================================================
+nearest_distance = 0.39478516578674316  (tau = 0.85)
+gate: gate passed
+abstained flag: False
+retrieval (pre-gate) Evidence:
+  d=0.3948  [intro-cs] 05 codes and error detection  ›  數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+  d=0.4441  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.4513  [dsa] number encoding  ›  數字編碼 * › 原碼、一補數和二補數
+  d=0.4678  [dsa] summary  ›  小結 › 重點回顧 › Q & A
+  d=0.5021  [dsa] summary  ›  小結 › 重點回顧 › Q & A
+--- answer ---
+我不知道。
+--- cited Evidence cards ---
+  - 05 codes and error detection (note) — 數碼、文數字碼、錯誤偵測碼及更正碼 › 5-1 數碼
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - number encoding (note) — 數字編碼 * › 原碼、一補數和二補數
+  - summary (note) — 小結 › 重點回顧 › Q & A
+  - summary (note) — 小結 › 重點回顧 › Q & A
+

@@ -69,6 +69,37 @@ no longer found there leaves the corpus with its Chunks, named in the run's
 report (ADR-0005). So bumping the pinned commit and re-running is how the
 corpus follows upstream — deletions included — rather than a manual cleanup.
 
+## First-party material
+
+Not everything under `data/corpus/` is fetched third-party text. Material the
+corpus owner wrote or generated for themselves has no upstream to pin and no
+license to work around, so it is not in `scripts/fetch_zh_corpus.py` — it just
+lives under `data/corpus/`, which `/data/` in `.gitignore` keeps out of commits
+like the rest.
+
+### intro-cs-fundamentals
+
+| | |
+|---|---|
+| Origin | First-party — LLM-rewritten study notes by the corpus owner |
+| License | None — the owner's own material |
+| Lands at | `data/corpus/intro-cs-fundamentals/` |
+| Contents | 5 Markdown files: computer systems, number systems, complement systems, floating point, codes & error detection |
+| Domain | `intro-cs` |
+
+Traditional Chinese intro-CS notes with headings, tables and ASCII-diagram code
+fences — the structured chunking path, same as hello-algo but at a fraction of
+the volume. There is no fetch step; the files are placed by hand.
+
+```
+python cli.py ingest data/corpus/intro-cs-fundamentals --domain intro-cs
+```
+
+Because the text is LLM-rewritten rather than transcribed from one cited
+source, it inherits that provenance: fluent and structured, but not a primary
+reference. Treat a wrong answer traced back to it as a possible corpus error,
+not only a retrieval one.
+
 ## Why none of this belongs in `tests/fixtures/`
 
 Beyond the license: `tests/test_ingest_ask_seam.py` pins a specific retrieval

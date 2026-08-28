@@ -1,0 +1,14 @@
+Week 4 milestone (issue #10) — ingestion run outputs, verbatim.
+Regenerate: python cli.py ingest <folder> --domain <domain>
+
+$ python cli.py ingest data/corpus/intro-cs-fundamentals --domain intro-cs   # run 1
+Ingested 5, skipped 0 unchanged, retired 0, failed 0.
+
+$ python cli.py ingest data/corpus/intro-cs-fundamentals --domain intro-cs   # run 2 (immediate re-run)
+Ingested 0, skipped 5 unchanged, retired 0, failed 0.
+
+$ python cli.py ingest data/corpus/hello-algo/zh-hant/docs --domain dsa      # run 1
+Ingested 0, skipped 119 unchanged, retired 0, failed 0.
+
+$ python cli.py ingest data/corpus/hello-algo/zh-hant/docs --domain dsa      # run 2 (immediate re-run)
+Ingested 0, skipped 119 unchanged, retired 0, failed 0.
