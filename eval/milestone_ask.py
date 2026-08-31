@@ -38,7 +38,7 @@ from config import (
     MAX_CHUNKS_PER_DOCUMENT,
     TOP_K,
 )
-from core.ask import ask
+from core.ask import Abstention, ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.retriever import retrieve
@@ -100,13 +100,13 @@ def run(question: str, domain: str | None) -> None:
     print(f"nearest_distance = {nearest!r}  (tau = {tau})")
     gate = "GATE FIRED (layer 1)" if (not evidence or nearest > tau) else "gate passed"
     print(f"gate: {gate}")
-    print(f"abstained flag: {answer.abstained}")
+    print(f"abstention: {answer.abstention.value}")
     print("retrieval (pre-gate) Evidence:")
     for chunk in evidence:
         print(f"  d={chunk.distance:.4f}  [{chunk.domain}] {chunk.title}  ›  {chunk.locator}")
     print("--- answer ---")
     print(answer.text)
-    if not answer.abstained:
+    if answer.abstention is Abstention.NONE:
         print("--- cited Evidence cards ---")
         for chunk in answer.evidence:
             print(f"  - {chunk.title} ({chunk.source_type}) — {chunk.locator}")

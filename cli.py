@@ -17,7 +17,7 @@ from config import (
     REGISTRY_PATH,
     TOP_K,
 )
-from core.ask import ask
+from core.ask import Abstention, Answer, ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.registry import Registry
@@ -123,6 +123,51 @@ def describe_filter(chunk_filter: ChunkFilter) -> str:
     )
 
 
+def print_answer(answer: Answer) -> None:
+    """One Answer as the terminal reads it: the text, then what backs it.
+
+    Which layer declined is read off the Answer rather than recognised in its
+    wording -- the pipeline already decided, and a surface that decided again
+    could disagree with it (#20).
+
+    The branch below asks which layer fired rather than whether any did, and
+    deliberately so: the two Abstentions render differently because they *are*
+    different. The gate abstains before generation is given anything, so there
+    is nothing to cite and the scope is worth naming as the possible reason;
+    the backstop abstains over Evidence that was assembled and handed over, so
+    it keeps its cards -- that Evidence is exactly what the reader needs in
+    order to disagree (#21). Widening this to "any Abstention" would take those
+    cards away.
+    """
+    print(answer.text)
+
+    if answer.abstention is Abstention.DISTANCE_GATE:
+        # A scoped question abstains on the corpus it was scoped to, and the
+        # abstention text speaks of "the corpus" -- so the restriction is named
+        # here rather than leaving the reader to read it as "your notes do not
+        # cover this" when the truth may be "not under that Domain". Read off
+        # the Answer's own filter: it is the scope this answer was given under.
+        restriction = describe_filter(answer.chunk_filter)
+        if restriction:
+            print()
+            print(f"(The question was restricted to {restriction}.)")
+        # An abstention is the one moment an underived tau visibly costs the
+        # reader an answer, so that is where it admits it is underived.
+        if DISTANCE_THRESHOLD.provisional:
+            print()
+            print(
+                f"(The distance gate used tau={DISTANCE_THRESHOLD.value}, hand-set for "
+                f"{DISTANCE_THRESHOLD.embedding_model} and not yet derived from the "
+                "eval sweep — see ADR-0003.)"
+            )
+        return
+
+    print()
+    print("Sources:")
+    for chunk in answer.evidence:
+        print(source_card(chunk))
+
+
 def cmd_ask(args: argparse.Namespace) -> None:
     # Asserted before the store is opened or a key is needed: a tau belonging
     # to another embedding model is a misconfiguration, not a bad answer.
@@ -145,31 +190,7 @@ def cmd_ask(args: argparse.Namespace) -> None:
         max_chunks_per_document=args.max_per_document,
     )
 
-    print(answer.text)
-    if answer.abstained:
-        # A scoped question abstains on the corpus it was scoped to, and the
-        # abstention text speaks of "the corpus" -- so the restriction is named
-        # here rather than leaving the reader to read it as "your notes do not
-        # cover this" when the truth may be "not under that Domain".
-        restriction = describe_filter(chunk_filter)
-        if restriction:
-            print()
-            print(f"(The question was restricted to {restriction}.)")
-        # An abstention is the one moment an underived tau visibly costs the
-        # reader an answer, so that is where it admits it is underived.
-        if DISTANCE_THRESHOLD.provisional:
-            print()
-            print(
-                f"(The distance gate used tau={DISTANCE_THRESHOLD.value}, hand-set for "
-                f"{DISTANCE_THRESHOLD.embedding_model} and not yet derived from the "
-                "eval sweep — see ADR-0003.)"
-            )
-        return
-
-    print()
-    print("Sources:")
-    for chunk in answer.evidence:
-        print(source_card(chunk))
+    print_answer(answer)
 
 
 def build_parser() -> argparse.ArgumentParser:

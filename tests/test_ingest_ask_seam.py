@@ -13,7 +13,7 @@ import re
 import shutil
 from pathlib import Path
 
-from core.ask import ask
+from core.ask import Abstention, ask
 from core.embedder import FakeEmbedder
 from core.gate import ABSTENTION_TEXT
 from core.generator import FakeGenerator
@@ -54,6 +54,18 @@ class ExplodingGenerator:
 
     def generate(self, prompt: str) -> str:
         raise AssertionError("the distance gate should have abstained before generation")
+
+
+class RefusalSoundingGenerator:
+    """Prose that reads like an abstention while declaring nothing.
+
+    The offline stand-in for the limitation #19 records: a model that gives up
+    in words the pipeline was never told to look for is answered as an ordinary
+    answer, with its Evidence, exactly as it is today.
+    """
+
+    def generate(self, prompt: str) -> str:
+        return "I don't know — the Evidence here doesn't cover that."
 
 BST_ID = derive_doc_id("dsa/binary_search_tree.md")
 SCHEDULING_ID = derive_doc_id("os/process_scheduling.md")
@@ -618,7 +630,7 @@ def test_an_out_of_corpus_trap_abstains_without_calling_the_llm(tmp_path):
 
     answer = _ask_through_the_gate(OUT_OF_CORPUS_TRAP, store, embedder, ExplodingGenerator())
 
-    assert answer.abstained
+    assert answer.abstention is Abstention.DISTANCE_GATE
     assert answer.text == ABSTENTION_TEXT
 
 
@@ -635,8 +647,36 @@ def test_a_question_the_corpus_covers_still_answers_under_the_same_gate(tmp_path
 
     answer = _ask_through_the_gate(COVERED_QUESTION, store, embedder, FakeGenerator())
 
-    assert not answer.abstained
+    assert answer.abstention is Abstention.NONE
     assert answer.evidence[0].doc_id == SCHEDULING_ID
+
+
+def test_which_layer_abstained_is_read_off_the_answer_and_not_off_its_text(tmp_path):
+    # The two outcomes a reader has to tell apart, told apart without either
+    # answer's text being looked at -- which is what lets a surface render an
+    # Abstention without re-deriving the decision the pipeline already made.
+    _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
+
+    gated = _ask_through_the_gate(OUT_OF_CORPUS_TRAP, store, embedder, ExplodingGenerator())
+    answered = _ask_through_the_gate(COVERED_QUESTION, store, embedder, FakeGenerator())
+
+    assert gated.abstention is Abstention.DISTANCE_GATE
+    assert answered.abstention is Abstention.NONE
+
+
+def test_an_answer_that_merely_reads_like_a_refusal_is_an_ordinary_answer(tmp_path):
+    # Layer 2 has no way to declare itself until #21, so prose that sounds like
+    # an abstention is not one: the reason follows the pipeline's own decision,
+    # never the shape of the text. Asserted against a double whose wording this
+    # module chose, not against model prose (ADR-0002).
+    _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
+
+    answer = _ask_through_the_gate(
+        COVERED_QUESTION, store, embedder, RefusalSoundingGenerator()
+    )
+
+    assert answer.abstention is Abstention.NONE
+    assert answer.evidence != []
 
 
 # Mixed-format corpus. Every fixture above is Markdown, which is how "the walk

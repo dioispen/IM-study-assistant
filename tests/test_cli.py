@@ -10,8 +10,10 @@ store exists to filter.
 
 import pytest
 
-from cli import build_parser, describe_filter, source_card
-from config import MAX_CHUNKS_PER_DOCUMENT
+from cli import build_parser, describe_filter, print_answer, source_card
+from config import DISTANCE_THRESHOLD, MAX_CHUNKS_PER_DOCUMENT
+from core.ask import Abstention, Answer
+from core.gate import ABSTENTION_TEXT
 from core.store import ChunkFilter, RetrievedChunk
 
 
@@ -113,3 +115,64 @@ def test_a_filter_is_described_by_whichever_axes_it_restricts():
         == "domain dsa, source type note"
     )
     assert describe_filter(ChunkFilter()) == ""
+
+
+def gate_abstention(chunk_filter=ChunkFilter()):
+    return Answer(
+        text=ABSTENTION_TEXT,
+        evidence=[],
+        abstention=Abstention.DISTANCE_GATE,
+        chunk_filter=chunk_filter,
+    )
+
+
+def test_a_gate_abstention_prints_its_text_and_cites_nothing(capsys):
+    # Which layer declined is read off the Answer, so the terminal never has to
+    # recognise an abstention by the words it is written in.
+    print_answer(gate_abstention())
+
+    out = capsys.readouterr().out
+    assert ABSTENTION_TEXT in out
+    assert "Sources:" not in out
+
+
+def test_a_gate_abstention_names_the_restriction_it_was_asked_under(capsys):
+    # The abstention text speaks of "the corpus", so a scoped question says
+    # what it was scoped to -- read off the Answer's own filter rather than off
+    # whatever scope happens to be in force at display time.
+    print_answer(gate_abstention(ChunkFilter(domain="dsa", source_type="note")))
+
+    out = capsys.readouterr().out
+    assert "restricted to domain dsa, source type note" in out
+
+
+def test_an_unrestricted_abstention_names_no_restriction(capsys):
+    print_answer(gate_abstention())
+
+    assert "restricted to" not in capsys.readouterr().out
+
+
+def test_an_abstention_admits_an_underived_tau_for_exactly_as_long_as_it_is_one(capsys):
+    # An abstention is the one moment a provisional tau visibly costs the
+    # reader an answer. Tied to the threshold's own flag, so Week 6 deriving it
+    # removes the notice with no edit here.
+    print_answer(gate_abstention())
+
+    out = capsys.readouterr().out
+    assert (f"tau={DISTANCE_THRESHOLD.value}" in out) == DISTANCE_THRESHOLD.provisional
+
+
+def test_an_ordinary_answer_prints_a_source_card_per_evidence_chunk(capsys):
+    answer = Answer(
+        text="A collision is two keys landing in one bucket.",
+        evidence=[make_chunk(), make_chunk(chunk_id="doc2:000", doc_id="doc2", title="hashing")],
+        abstention=Abstention.NONE,
+        chunk_filter=ChunkFilter(),
+    )
+
+    print_answer(answer)
+
+    out = capsys.readouterr().out
+    assert "Sources:" in out
+    assert out.count("- ") == 2
+    assert source_card(answer.evidence[0]) in out

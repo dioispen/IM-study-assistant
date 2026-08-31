@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from cli import source_card
-from core.ask import ask
+from core.ask import Abstention, ask
 from core.embedder import FakeEmbedder
 from core.gate import ABSTENTION_TEXT
 from core.generator import FakeGenerator
@@ -196,9 +196,46 @@ def test_a_filter_the_corpus_cannot_satisfy_abstains_rather_than_reaching_wider(
         chunk_filter=ChunkFilter(domain="security"),
     )
 
-    assert answer.abstained
+    assert answer.abstention is Abstention.DISTANCE_GATE
     assert answer.text == ABSTENTION_TEXT
     assert answer.evidence == []
+
+
+def test_an_answer_carries_the_filter_the_question_was_answered_under(tmp_path):
+    # The scope is part of what happened, not part of how it was asked: a turn
+    # redisplayed after the filter has moved on has to show the scope it was
+    # answered under, and re-reading the filter in force at display time would
+    # relabel it retroactively.
+    _registry, store, embedder = _ingest_mixed(tmp_path)
+    scope = ChunkFilter(domain="dsa", source_type="note")
+
+    answer = _ask(store, embedder, top_k=TOTAL_CHUNKS, chunk_filter=scope)
+
+    assert answer.chunk_filter == scope
+
+
+def test_an_unrestricted_question_carries_the_unfiltered_filter(tmp_path):
+    # `ChunkFilter()` is the unfiltered question (core/store.py), so the
+    # unfiltered case needs no second representation and no reader downstream
+    # has to branch on a missing one.
+    _registry, store, embedder = _ingest_mixed(tmp_path)
+
+    answer = _ask(store, embedder, top_k=TOTAL_CHUNKS)
+
+    assert answer.chunk_filter == ChunkFilter()
+
+
+def test_a_gate_abstention_carries_the_scope_that_produced_it(tmp_path):
+    # The case the scope exists to disambiguate: nothing came back because the
+    # question was restricted to a Domain the corpus holds nothing under, which
+    # is not the same fact about the corpus as "nothing covers this".
+    _registry, store, embedder = _ingest_mixed(tmp_path)
+    scope = ChunkFilter(domain="security")
+
+    answer = _ask(store, embedder, top_k=TOTAL_CHUNKS, chunk_filter=scope)
+
+    assert answer.abstention is Abstention.DISTANCE_GATE
+    assert answer.chunk_filter == scope
 
 
 def test_one_document_can_crowd_the_top_of_an_uncapped_result(tmp_path):
