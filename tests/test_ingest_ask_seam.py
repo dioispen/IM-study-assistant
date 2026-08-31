@@ -16,7 +16,7 @@ from pathlib import Path
 from core.ask import Abstention, ask
 from core.embedder import FakeEmbedder
 from core.gate import ABSTENTION_TEXT
-from core.generator import FakeGenerator
+from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL, FakeGenerator
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
 from cli import source_card
@@ -59,13 +59,25 @@ class ExplodingGenerator:
 class RefusalSoundingGenerator:
     """Prose that reads like an abstention while declaring nothing.
 
-    The offline stand-in for the limitation #19 records: a model that gives up
-    in words the pipeline was never told to look for is answered as an ordinary
-    answer, with its Evidence, exactly as it is today.
+    The offline stand-in for the limitation ADR-0008 records: a model that
+    gives up in words the pipeline was never told to look for is answered as an
+    ordinary answer, with its Evidence.
     """
 
     def generate(self, prompt: str) -> str:
         return "I don't know — the Evidence here doesn't cover that."
+
+
+class DeclaringGenerator:
+    """A model honouring the backstop contract: the sentinel line, alone.
+
+    The whole of what the suite asserts about layer 2 -- our handling of a
+    declared signal, never the shape of real model prose (ADR-0002).
+    """
+
+    def generate(self, prompt: str) -> str:
+        return BACKSTOP_SENTINEL
+
 
 BST_ID = derive_doc_id("dsa/binary_search_tree.md")
 SCHEDULING_ID = derive_doc_id("os/process_scheduling.md")
@@ -665,8 +677,8 @@ def test_which_layer_abstained_is_read_off_the_answer_and_not_off_its_text(tmp_p
 
 
 def test_an_answer_that_merely_reads_like_a_refusal_is_an_ordinary_answer(tmp_path):
-    # Layer 2 has no way to declare itself until #21, so prose that sounds like
-    # an abstention is not one: the reason follows the pipeline's own decision,
+    # The sentinel is the only thing parsed (ADR-0008), so prose that sounds
+    # like an abstention is not one: the reason follows a declared signal,
     # never the shape of the text. Asserted against a double whose wording this
     # module chose, not against model prose (ADR-0002).
     _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
@@ -677,6 +689,55 @@ def test_an_answer_that_merely_reads_like_a_refusal_is_an_ordinary_answer(tmp_pa
 
     assert answer.abstention is Abstention.NONE
     assert answer.evidence != []
+
+
+def test_a_declared_backstop_abstention_keeps_the_evidence_it_was_judged_from(tmp_path):
+    # Layer 2 fires after Evidence was assembled and handed over, so its
+    # Abstention cites exactly the material the model judged insufficient --
+    # which is what lets a reader look at it and disagree (#19 story 14).
+    _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
+
+    answered = _ask_through_the_gate(COVERED_QUESTION, store, embedder, FakeGenerator())
+    declared = _ask_through_the_gate(
+        COVERED_QUESTION, store, embedder, DeclaringGenerator()
+    )
+
+    assert declared.abstention is Abstention.PROMPT_BACKSTOP
+    assert [chunk.chunk_id for chunk in declared.evidence] == [
+        chunk.chunk_id for chunk in answered.evidence
+    ]
+
+
+def test_a_declared_backstop_abstention_never_shows_the_reader_the_sentinel(tmp_path):
+    # The sentinel is a contract between the prompt and the pipeline, not
+    # something a reader should have to decode. What leaves the seam is the
+    # Abstention in words.
+    _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
+
+    answer = _ask_through_the_gate(
+        COVERED_QUESTION, store, embedder, DeclaringGenerator()
+    )
+
+    assert BACKSTOP_SENTINEL not in answer.text
+    assert answer.text == BACKSTOP_ABSTENTION_TEXT
+
+
+def test_the_two_abstentions_differ_in_what_they_cite(tmp_path):
+    # The distinction ADR-0003's two layers earn on any surface: the gate
+    # abstained before generation was given anything, so it cites nothing,
+    # while the backstop abstained over Evidence and keeps it.
+    _registry, store, embedder, _dsa, _os = _ingest_corpus(tmp_path)
+
+    gated = _ask_through_the_gate(
+        OUT_OF_CORPUS_TRAP, store, embedder, ExplodingGenerator()
+    )
+    backstopped = _ask_through_the_gate(
+        COVERED_QUESTION, store, embedder, DeclaringGenerator()
+    )
+
+    assert gated.evidence == []
+    assert backstopped.evidence != []
+    assert gated.abstention is not backstopped.abstention
 
 
 # Mixed-format corpus. Every fixture above is Markdown, which is how "the walk

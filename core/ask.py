@@ -10,7 +10,12 @@ from enum import Enum
 
 from core.embedder import Embedder
 from core.gate import ABSTENTION_TEXT, should_abstain
-from core.generator import Generator, build_prompt
+from core.generator import (
+    BACKSTOP_ABSTENTION_TEXT,
+    Generator,
+    build_prompt,
+    declares_abstention,
+)
 from core.retriever import retrieve
 from core.store import ChunkFilter, RetrievedChunk, VectorStore
 
@@ -30,8 +35,11 @@ class Abstention(Enum):
     downstream re-derives it from the answer's wording -- the words are model
     prose in one case and a constant in the other, and neither is a decision.
 
-    PROMPT_BACKSTOP is unreachable until the backstop has a way to declare
-    itself (#21); the state exists as what that signal maps onto.
+    PROMPT_BACKSTOP is reached only by the sentinel the generation
+    instructions ask for (ADR-0008). A model that gives up in its own words
+    instead declares nothing, and its answer is an ordinary answer -- the known
+    limitation that ADR records, rather than a heuristic that would have this
+    enum quietly depend on the shape of model prose.
     """
 
     NONE = "none"
@@ -90,6 +98,20 @@ def ask(
 
     prompt = build_prompt(question, evidence)
     text = generator.generate(prompt)
+
+    if declares_abstention(text):
+        # Layer 2 of ADR-0003, mapped here so the sentinel never leaves the
+        # pipeline: it is a contract between the prompt and this line, and a
+        # surface that received it would be reading generated text to work out
+        # what happened. The Evidence stays -- it is exactly what the model
+        # judged insufficient, and the reader needs it to disagree.
+        return Answer(
+            text=BACKSTOP_ABSTENTION_TEXT,
+            evidence=evidence,
+            abstention=Abstention.PROMPT_BACKSTOP,
+            chunk_filter=chunk_filter,
+        )
+
     return Answer(
         text=text,
         evidence=evidence,

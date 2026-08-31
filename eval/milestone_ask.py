@@ -7,8 +7,10 @@ questions run through the real pipeline so a human can read the generated prose
 someone reads it).
 
 Prints, per question: the nearest retrieval distance, whether the distance gate
-fired, the answer, and the Evidence -- both what retrieval returned pre-gate and
-what the answer cited. `retrieve` is called separately from `ask` only to expose
+fired, which Abstention the pipeline reported -- layer 2 declares itself since
+ADR-0008, so it is read off the Answer rather than out of the prose -- the
+answer, and the Evidence, both what retrieval returned pre-gate and what the
+answer cited. `retrieve` is called separately from `ask` only to expose
 the pre-gate distances, which `ask` does not return.
 
     python eval/milestone_ask.py > docs/milestones/2026-w4-corpus-load/ask_results.txt
@@ -38,7 +40,7 @@ from config import (
     MAX_CHUNKS_PER_DOCUMENT,
     TOP_K,
 )
-from core.ask import Abstention, ask
+from core.ask import ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.retriever import retrieve
@@ -106,7 +108,12 @@ def run(question: str, domain: str | None) -> None:
         print(f"  d={chunk.distance:.4f}  [{chunk.domain}] {chunk.title}  ›  {chunk.locator}")
     print("--- answer ---")
     print(answer.text)
-    if answer.abstention is Abstention.NONE:
+    # Whatever the Answer cites, an abstention included: layer 2 judged
+    # Evidence that was assembled and handed over, and reading whether it gave
+    # up too early is what a milestone hand-read is for (ADR-0008). Read off
+    # the Evidence rather than off the reason, so this cannot come to disagree
+    # with which reason carries cards.
+    if answer.evidence:
         print("--- cited Evidence cards ---")
         for chunk in answer.evidence:
             print(f"  - {chunk.title} ({chunk.source_type}) — {chunk.locator}")

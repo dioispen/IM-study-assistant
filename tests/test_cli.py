@@ -14,6 +14,7 @@ from cli import build_parser, describe_filter, print_answer, source_card
 from config import DISTANCE_THRESHOLD, MAX_CHUNKS_PER_DOCUMENT
 from core.ask import Abstention, Answer
 from core.gate import ABSTENTION_TEXT
+from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL
 from core.store import ChunkFilter, RetrievedChunk
 
 
@@ -176,3 +177,42 @@ def test_an_ordinary_answer_prints_a_source_card_per_evidence_chunk(capsys):
     assert "Sources:" in out
     assert out.count("- ") == 2
     assert source_card(answer.evidence[0]) in out
+
+
+def backstop_abstention(evidence=None):
+    return Answer(
+        text=BACKSTOP_ABSTENTION_TEXT,
+        evidence=[make_chunk()] if evidence is None else evidence,
+        abstention=Abstention.PROMPT_BACKSTOP,
+        chunk_filter=ChunkFilter(),
+    )
+
+
+def test_a_backstop_abstention_keeps_the_cards_it_was_judged_from(capsys):
+    # The backstop fired over Evidence that was assembled and handed to the
+    # model, so the cards are exactly the material it judged insufficient --
+    # and the reader needs them in order to disagree (#21).
+    print_answer(backstop_abstention())
+
+    out = capsys.readouterr().out
+    assert BACKSTOP_ABSTENTION_TEXT in out
+    assert "Sources:" in out
+    assert source_card(make_chunk()) in out
+
+
+def test_a_backstop_abstention_shows_no_contract_token_to_the_reader(capsys):
+    print_answer(backstop_abstention())
+
+    assert BACKSTOP_SENTINEL not in capsys.readouterr().out
+
+
+def test_the_two_abstentions_are_told_apart_by_which_cards_they_print(capsys):
+    # The pair that makes ADR-0003's two layers visible on the terminal: same
+    # branch, opposite outcomes, and neither read off the answer's text.
+    print_answer(gate_abstention())
+    gated = capsys.readouterr().out
+    print_answer(backstop_abstention())
+    backstopped = capsys.readouterr().out
+
+    assert "Sources:" not in gated
+    assert "Sources:" in backstopped
