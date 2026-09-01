@@ -1,5 +1,10 @@
 """Command-line entry point: ingest a folder of Documents, or ask a question
-and get a cited answer with source cards."""
+and get a cited answer with Evidence cards.
+
+The terminal is one of two surfaces over the same pipeline, so what a card says
+is not written here -- presentation.py holds the wording both surfaces show,
+and this module composes it into lines (#22).
+"""
 
 import argparse
 import sys
@@ -21,8 +26,13 @@ from core.ask import Abstention, Answer, ask
 from core.embedder import OpenAIEmbedder
 from core.generator import OpenAIGenerator
 from core.registry import Registry
-from core.store import ChunkFilter, RetrievedChunk, VectorStore
+from core.store import ChunkFilter, VectorStore
 from ingestion.common import FolderNotFound, OutsideCorpusRoot, ingest_folder
+from presentation import (
+    describe_filter,
+    evidence_card,
+    provisional_threshold_notice,
+)
 
 
 NO_CAP = "off"
@@ -97,32 +107,6 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(failure.warning(), file=sys.stderr)
 
 
-def source_card(chunk: RetrievedChunk) -> str:
-    """One Evidence Chunk as the line a reader follows back to the note.
-
-    One card per Chunk of the Evidence and none besides, which is what makes
-    the cards report the answer's real footing: a question scoped to one Domain
-    or capped per Document has fewer Chunks to show, and showing anything the
-    Evidence does not hold would credit the answer to a Document generation was
-    never given (CONTEXT.md: Evidence is the only thing an answer's citations
-    may point at).
-    """
-    return f"- {chunk.title} ({chunk.source_type}) — {chunk.locator}"
-
-
-def describe_filter(chunk_filter: ChunkFilter) -> str:
-    """The restriction in the reader's words, for a message that has to say
-    what the question was narrowed to."""
-    return ", ".join(
-        f"{label} {value}"
-        for label, value in (
-            ("domain", chunk_filter.domain),
-            ("source type", chunk_filter.source_type),
-        )
-        if value is not None
-    )
-
-
 def print_answer(answer: Answer) -> None:
     """One Answer as the terminal reads it: the text, then what backs it.
 
@@ -152,20 +136,21 @@ def print_answer(answer: Answer) -> None:
             print()
             print(f"(The question was restricted to {restriction}.)")
         # An abstention is the one moment an underived tau visibly costs the
-        # reader an answer, so that is where it admits it is underived.
-        if DISTANCE_THRESHOLD.provisional:
+        # reader an answer, so that is where it admits it is underived. Whether
+        # there is anything to admit is the threshold's own business
+        # (presentation.py); the parentheses are this terminal's.
+        notice = provisional_threshold_notice()
+        if notice:
             print()
-            print(
-                f"(The distance gate used tau={DISTANCE_THRESHOLD.value}, hand-set for "
-                f"{DISTANCE_THRESHOLD.embedding_model} and not yet derived from the "
-                "eval sweep — see ADR-0003.)"
-            )
+            print(f"({notice})")
         return
 
     print()
     print("Sources:")
     for chunk in answer.evidence:
-        print(source_card(chunk))
+        # The card says what the Chunk is; the bullet is how a terminal writes
+        # a list of them.
+        print(f"- {evidence_card(chunk)}")
 
 
 def cmd_ask(args: argparse.Namespace) -> None:

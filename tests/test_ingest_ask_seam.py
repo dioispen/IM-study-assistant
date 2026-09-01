@@ -19,8 +19,8 @@ from core.gate import ABSTENTION_TEXT
 from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL, FakeGenerator
 from core.registry import Registry, derive_doc_id
 from core.store import VectorStore
-from cli import source_card
 from ingestion.common import ingest_folder
+from presentation import evidence_card
 from tests.docx_fixture import BODY, corrupt_a_part, write_docx
 from tests.pdf_fixture import write_pdf
 
@@ -1156,11 +1156,12 @@ def test_the_page_a_paper_is_cited_by_is_a_page_its_text_is_on(tmp_path):
     assert answer.evidence[0].locator in {"p. 2", "p. 3"}
 
 
-def test_a_source_card_for_a_paper_names_its_page(tmp_path):
-    # The line the reader actually follows back. `source_card` is written over
-    # RetrievedChunk and knows nothing about pages, which is what lets a second
-    # Locator shape reach the reader with no change to the CLI -- the promise
-    # PLAN.md §5.2 made for `locator` when this package was deferred.
+def test_an_evidence_card_for_a_paper_names_its_page(tmp_path):
+    # The line the reader actually follows back. `evidence_card` is written
+    # over RetrievedChunk and knows nothing about pages, which is what lets a
+    # second Locator shape reach the reader with no change to either surface --
+    # the promise PLAN.md §5.2 made for `locator` when this package was
+    # deferred.
     _registry, store, embedder, _report = _ingest_paper(tmp_path)
 
     answer = ask(
@@ -1173,8 +1174,8 @@ def test_a_source_card_for_a_paper_names_its_page(tmp_path):
     )
     [cited] = answer.evidence
 
-    assert source_card(cited) == (
-        f"- deadlock detection survey (paper) — {cited.locator}"
+    assert evidence_card(cited) == (
+        f"deadlock detection survey (paper) — {cited.locator}"
     )
 
 

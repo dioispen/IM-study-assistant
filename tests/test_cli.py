@@ -1,5 +1,10 @@
 """The command-line entry point's own surface: the arguments a scoped question
-is asked with, and the source cards its Evidence is rendered as.
+is asked with, and what the terminal makes of the Answer it gets back.
+
+What a card or a notice *says* is asserted in test_presentation.py, where the
+wording now lives (#22). What is asserted here is this surface's share of it:
+which Answer gets cards at all, and how a terminal frames the strings it is
+given -- a bulleted list, a parenthetical aside.
 
 Nothing here opens a store or reaches a model -- `cmd_ask` builds the real
 OpenAI clients, so what is testable offline is the parsing in front of it and
@@ -10,30 +15,18 @@ store exists to filter.
 
 import pytest
 
-from cli import build_parser, describe_filter, print_answer, source_card
-from config import DISTANCE_THRESHOLD, MAX_CHUNKS_PER_DOCUMENT
+from cli import build_parser, print_answer
+from config import MAX_CHUNKS_PER_DOCUMENT
 from core.ask import Abstention, Answer
 from core.gate import ABSTENTION_TEXT
 from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL
-from core.store import ChunkFilter, RetrievedChunk
+from core.store import ChunkFilter
+from presentation import evidence_card, provisional_threshold_notice
+from tests.chunk_fixture import make_chunk
 
 
 def parse(*argv):
     return build_parser().parse_args(list(argv))
-
-
-def make_chunk(**overrides):
-    fields = dict(
-        chunk_id="doc1:000",
-        doc_id="doc1",
-        locator="Hash Table › Buckets",
-        domain="dsa",
-        source_type="note",
-        title="hash table",
-        text="A hash table stores each key in a bucket.",
-        distance=0.2,
-    )
-    return RetrievedChunk(**{**fields, **overrides})
 
 
 def test_a_question_can_be_asked_unrestricted():
@@ -100,24 +93,6 @@ def test_a_cap_that_is_neither_a_number_nor_off_is_refused():
         parse("ask", "q", "--max-per-document", "none")
 
 
-def test_a_source_card_names_the_title_source_type_and_locator():
-    card = source_card(make_chunk())
-
-    assert "hash table" in card
-    assert "(note)" in card
-    assert "Hash Table › Buckets" in card
-
-
-def test_a_filter_is_described_by_whichever_axes_it_restricts():
-    assert describe_filter(ChunkFilter(domain="dsa")) == "domain dsa"
-    assert describe_filter(ChunkFilter(source_type="note")) == "source type note"
-    assert (
-        describe_filter(ChunkFilter(domain="dsa", source_type="note"))
-        == "domain dsa, source type note"
-    )
-    assert describe_filter(ChunkFilter()) == ""
-
-
 def gate_abstention(chunk_filter=ChunkFilter()):
     return Answer(
         text=ABSTENTION_TEXT,
@@ -153,17 +128,23 @@ def test_an_unrestricted_abstention_names_no_restriction(capsys):
     assert "restricted to" not in capsys.readouterr().out
 
 
-def test_an_abstention_admits_an_underived_tau_for_exactly_as_long_as_it_is_one(capsys):
+def test_an_abstention_carries_the_provisional_tau_notice_as_a_parenthetical(capsys):
     # An abstention is the one moment a provisional tau visibly costs the
-    # reader an answer. Tied to the threshold's own flag, so Week 6 deriving it
-    # removes the notice with no edit here.
+    # reader an answer, so the abstention branch is where the notice belongs.
+    # What it says is presentation.py's business (test_presentation.py); what
+    # is asserted here is that this surface shows it and shows it as an aside
+    # -- and has nothing of its own to say once there is no notice to show.
     print_answer(gate_abstention())
 
     out = capsys.readouterr().out
-    assert (f"tau={DISTANCE_THRESHOLD.value}" in out) == DISTANCE_THRESHOLD.provisional
+    notice = provisional_threshold_notice()
+    if notice is None:
+        assert "tau=" not in out
+    else:
+        assert f"({notice})" in out
 
 
-def test_an_ordinary_answer_prints_a_source_card_per_evidence_chunk(capsys):
+def test_an_ordinary_answer_prints_an_evidence_card_per_evidence_chunk(capsys):
     answer = Answer(
         text="A collision is two keys landing in one bucket.",
         evidence=[make_chunk(), make_chunk(chunk_id="doc2:000", doc_id="doc2", title="hashing")],
@@ -176,7 +157,8 @@ def test_an_ordinary_answer_prints_a_source_card_per_evidence_chunk(capsys):
     out = capsys.readouterr().out
     assert "Sources:" in out
     assert out.count("- ") == 2
-    assert source_card(answer.evidence[0]) in out
+    # The shared card, framed as this terminal frames a list of them.
+    assert f"- {evidence_card(answer.evidence[0])}" in out
 
 
 def backstop_abstention(evidence=None):
@@ -197,7 +179,7 @@ def test_a_backstop_abstention_keeps_the_cards_it_was_judged_from(capsys):
     out = capsys.readouterr().out
     assert BACKSTOP_ABSTENTION_TEXT in out
     assert "Sources:" in out
-    assert source_card(make_chunk()) in out
+    assert f"- {evidence_card(make_chunk())}" in out
 
 
 def test_a_backstop_abstention_shows_no_contract_token_to_the_reader(capsys):

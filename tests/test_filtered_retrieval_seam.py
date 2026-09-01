@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from cli import source_card
 from core.ask import Abstention, ask
 from core.embedder import FakeEmbedder
 from core.gate import ABSTENTION_TEXT
@@ -27,6 +26,7 @@ from core.registry import Registry, derive_doc_id
 from core.retriever import _initial_pool_size
 from core.store import ChunkFilter, VectorStore
 from ingestion.common import ingest_folder
+from presentation import evidence_card
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mixed"
 
@@ -319,7 +319,7 @@ def test_a_filter_and_a_cap_apply_together(tmp_path):
     assert max(per_document.values()) <= 2
 
 
-def test_the_source_cards_reflect_the_filtered_capped_evidence(tmp_path):
+def test_the_evidence_cards_reflect_the_filtered_capped_evidence(tmp_path):
     # What the reader is shown, rather than what retrieval returned. The cards
     # are the only place a Document appears by name, so a card for a Document
     # the filter excluded -- or a sixth card for a Document the cap held to two
@@ -333,7 +333,7 @@ def test_the_source_cards_reflect_the_filtered_capped_evidence(tmp_path):
         chunk_filter=ChunkFilter(domain="dsa"),
         max_chunks_per_document=2,
     )
-    cards = [source_card(chunk) for chunk in answer.evidence]
+    cards = [evidence_card(chunk) for chunk in answer.evidence]
 
     assert len(cards) == len(answer.evidence)
     assert all("(note)" in card or "(textbook)" in card for card in cards)
