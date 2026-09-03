@@ -24,6 +24,16 @@ python cli.py ask "只查我的 dsa 筆記" --domain dsa
 Chunk,原路徑上找不到的 Document 則被 retire(ADR-0005)。`ingest` 與 `ask`
 都需要環境變數 `OPENAI_API_KEY`,或放在 `cli.py` 旁的 `.env`。
 
+同一條 pipeline 也有網頁版:
+
+```
+streamlit run app.py
+```
+
+問題打在頁面上,回答下方一段 Evidence 一張卡片,標明 Document title、Source type
+與 Locator,展開就是生成當時拿到的那段文字。它讀的是命令列同一份 Document
+registry 與同一個向量庫,所以 `OPENAI_API_KEY` 的要求也一樣。
+
 ## 里程碑記錄
 
 每個週里程碑寫下的「哪裡通了、哪裡壞了、為什麼」的短記錄——第 8 週寫 README
