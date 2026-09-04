@@ -27,17 +27,24 @@ def configured_threshold(monkeypatch, **overrides):
     )
 
 
-def test_an_evidence_card_names_the_document_title_source_type_and_locator():
-    # The three fields a reader judges a Chunk by before trusting it, and the
+def test_an_evidence_card_names_the_document_title_domain_source_type_and_locator():
+    # The four fields a reader judges a Chunk by before trusting it, and the
     # whole card: no bullet, no widget, nothing that belongs to one surface.
-    assert evidence_card(make_chunk()) == "hash table (note) — Hash Table › Buckets"
+    assert evidence_card(make_chunk()) == "hash table (dsa, note) — Hash Table › Buckets"
+
+
+def test_an_evidence_card_names_the_domain_the_chunk_was_read_from():
+    # A question asked under no Domain restriction can be answered from the
+    # wrong subject, and the card is the only place that shows -- an ambiguous
+    # term like "tree" is the case this is for.
+    assert "network" in evidence_card(make_chunk(domain="network"))
 
 
 def test_an_evidence_card_names_whatever_shape_the_locator_took():
     # A card is written over the Locator and knows nothing about its shape, so
     # a page reaches the reader through the same card a heading path does
     # (CONTEXT.md -- a Locator is never named for any one shape).
-    assert evidence_card(make_chunk(locator="p. 3")) == "hash table (note) — p. 3"
+    assert evidence_card(make_chunk(locator="p. 3")) == "hash table (dsa, note) — p. 3"
 
 
 def test_a_filter_is_described_by_whichever_axes_it_restricts():

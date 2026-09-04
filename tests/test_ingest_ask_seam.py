@@ -1175,7 +1175,7 @@ def test_an_evidence_card_for_a_paper_names_its_page(tmp_path):
     [cited] = answer.evidence
 
     assert evidence_card(cited) == (
-        f"deadlock detection survey (paper) — {cited.locator}"
+        f"deadlock detection survey (os, paper) — {cited.locator}"
     )
 
 

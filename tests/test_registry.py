@@ -110,3 +110,47 @@ def test_deleting_an_unknown_doc_id_is_not_an_error(tmp_path):
     registry.delete("never-existed")
 
     assert registry.list() == []
+
+
+def test_source_types_are_the_values_something_was_actually_ingested_under(tmp_path):
+    # Source type is an open set (CONTEXT.md), so there is no configured list to
+    # read them off: the values exist only on the Documents that carry them, and
+    # a menu built over this becomes a real choice the moment a second Source
+    # type is ingested.
+    registry = Registry(tmp_path / "documents.sqlite")
+    registry.upsert(make_document(doc_id="a", source_type="note"))
+    registry.upsert(make_document(doc_id="b", source_type="textbook"))
+    registry.upsert(make_document(doc_id="c", source_type="note"))
+
+    assert registry.source_types() == ["note", "textbook"]
+
+
+def test_source_types_of_an_empty_registry_names_none(tmp_path):
+    registry = Registry(tmp_path / "documents.sqlite")
+
+    assert registry.source_types() == []
+
+
+def test_documents_per_domain_counts_the_documents_under_each_domain(tmp_path):
+    registry = Registry(tmp_path / "documents.sqlite")
+    registry.upsert(make_document(doc_id="a", domain="dsa"))
+    registry.upsert(make_document(doc_id="b", domain="dsa"))
+    registry.upsert(make_document(doc_id="c", domain="os"))
+
+    assert registry.documents_per_domain() == {"dsa": 2, "os": 1}
+
+
+def test_documents_per_domain_is_silent_about_a_domain_holding_nothing(tmp_path):
+    # A report of the corpus rather than of the configuration: `network` is a
+    # configured Domain, and a summary listing it at zero would be a line the
+    # reader has to check twice.
+    registry = Registry(tmp_path / "documents.sqlite")
+    registry.upsert(make_document(domain="dsa"))
+
+    assert registry.documents_per_domain() == {"dsa": 1}
+
+
+def test_documents_per_domain_of_an_empty_registry_counts_nothing(tmp_path):
+    registry = Registry(tmp_path / "documents.sqlite")
+
+    assert registry.documents_per_domain() == {}

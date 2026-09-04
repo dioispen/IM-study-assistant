@@ -104,3 +104,37 @@ class Registry:
             f"SELECT {', '.join(_COLUMNS)} FROM documents"
         ).fetchall()
         return [Document(*row) for row in rows]
+
+    def source_types(self) -> list[str]:
+        """Every Source type the corpus actually holds, in alphabetical order.
+
+        Source type is an open set (CONTEXT.md): there is no configured list of
+        them anywhere, so the values only exist here, on the Documents that were
+        ingested under them. A menu built over this becomes a real choice the
+        moment a second Source type is ingested, with no code change -- which is
+        the whole reason a surface asks the registry rather than a constant.
+
+        Ordered rather than left to whatever the rows come back in, so a menu
+        does not reshuffle itself between runs over an unchanged corpus.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT source_type FROM documents ORDER BY source_type"
+        ).fetchall()
+        return [source_type for (source_type,) in rows]
+
+    def documents_per_domain(self) -> dict[str, int]:
+        """How many Documents each Domain holds, for the Domains that hold any.
+
+        Documents rather than Chunks, and so read here rather than off the
+        vector store: the registry is the authority on what Documents exist
+        (ADR-0001), while the store holds one particular chunking of them -- a
+        count taken there would report a long note as a large corpus.
+
+        Silent about a configured Domain nothing was ever ingested under. This
+        is a report of the corpus rather than of the configuration, and a
+        Domain listed at zero would be a Domain the reader has to check twice.
+        """
+        rows = self._conn.execute(
+            "SELECT domain, COUNT(*) FROM documents GROUP BY domain ORDER BY domain"
+        ).fetchall()
+        return {domain: count for domain, count in rows}

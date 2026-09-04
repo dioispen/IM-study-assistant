@@ -30,9 +30,19 @@ Chunk,原路徑上找不到的 Document 則被 retire(ADR-0005)。`ingest` 與 `
 streamlit run app.py
 ```
 
-問題打在頁面上,回答下方一段 Evidence 一張卡片,標明 Document title、Source type
-與 Locator,展開就是生成當時拿到的那段文字。它讀的是命令列同一份 Document
-registry 與同一個向量庫,所以 `OPENAI_API_KEY` 的要求也一樣。
+問題打在頁面上,回答下方一段 Evidence 一張卡片,標明 Document title、Domain、
+Source type 與 Locator,展開就是生成當時拿到的那段文字。
+
+側邊欄放的是 Scope:一個 Domain 限制、一個 Source type 限制,選了就一直有效到改掉
+為止,兩者以 conjunction 疊加,最窄可以窄到「我自己的 dsa 筆記」。Domain 選單來自
+`config.py` 宣告的那份清單,Source type 選單則來自 Document registry 裡真正出現過的
+值——Source type 是開放集合,多匯入一種就自己多一個選項。選單底下順帶交代語料本身:
+每個 Domain 幾份 Document、目前有哪些 Source type,都讀 registry(ADR-0001)。每個
+turn 都標出它當初是在哪個 Scope 下被回答的,所以改了限制只影響下一題,不會回頭改寫
+上一題。
+
+它讀的是命令列同一份 Document registry 與同一個向量庫,所以 `OPENAI_API_KEY` 的
+要求也一樣。
 
 ## 里程碑記錄
 

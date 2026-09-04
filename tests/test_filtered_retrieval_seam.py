@@ -297,7 +297,10 @@ def test_the_evidence_cards_reflect_the_filtered_capped_evidence(tmp_path):
     cards = [evidence_card(chunk) for chunk in answer.evidence]
 
     assert len(cards) == len(answer.evidence)
-    assert all("(note)" in card or "(textbook)" in card for card in cards)
+    # Every card names the Domain it was scoped to, alongside whose words it
+    # holds -- so a card that escaped the filter is legible as such on the card
+    # itself rather than only in the doc_ids behind it.
+    assert all("(dsa, note)" in card or "(dsa, textbook)" in card for card in cards)
     assert not any("paging" in card or "virtual memory" in card for card in cards)
     assert sum("hash table" in card for card in cards) == 2
 

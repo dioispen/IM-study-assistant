@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 from config import (
     DISTANCE_THRESHOLD,
+    DOMAINS,
     EMBEDDING_MODEL,
     GENERATION_MODEL,
     MAX_CHUNKS_PER_DOCUMENT,
@@ -35,8 +36,8 @@ from core.ask import Answer, ask
 from core.embedder import Embedder, OpenAIEmbedder
 from core.generator import Generator, OpenAIGenerator
 from core.registry import Registry
-from core.store import RetrievedChunk, VectorStore
-from presentation import evidence_card
+from core.store import ChunkFilter, RetrievedChunk, VectorStore
+from presentation import describe_filter, evidence_card
 
 TITLE = "IM Study Assistant"
 
@@ -61,6 +62,36 @@ CLEAR_LABEL = "Clear session"
 # work in progress rather than as a page that has died.
 IN_FLIGHT_LABEL = "Retrieving Evidence and answering…"
 
+# The sidebar holds the Scope: what this session's questions are allowed to
+# retrieve from. Headed with the word CONTEXT.md uses for it, because the two
+# menus beneath narrow what may be *found* and never what may be *said*.
+SCOPE_HEADER = "Scope"
+
+# Each menu is keyed by the ChunkFilter field it fills. The key is what
+# Streamlit holds a selection under between runs, so naming it for the field
+# leaves no table anywhere translating a widget's name into a filter's.
+DOMAIN_KEY = "domain"
+SOURCE_TYPE_KEY = "source_type"
+
+DOMAIN_LABEL = "Domain"
+SOURCE_TYPE_LABEL = "Source type"
+
+# How each menu spells "no restriction on this axis". None is what the option
+# actually carries, because a ChunkFilter field left None is not a restriction
+# (core/store.py) -- so these are a wording for None rather than a sentinel the
+# page then has to translate back.
+ANY_DOMAIN = "Any Domain"
+ANY_SOURCE_TYPE = "Any Source type"
+
+CORPUS_HEADER = "In the corpus"
+DOMAIN_COUNTS_HEADING = "Documents per Domain:"
+
+# The Scope of a question that restricted neither axis. Named rather than left
+# blank: the whole Corpus is one of the Scopes CONTEXT.md defines, and a turn
+# that said nothing about its Scope would read as a turn whose Scope went
+# unrecorded.
+WHOLE_CORPUS = "the whole corpus"
+
 # What a corpus with no Document in it says for itself. An empty corpus abstains
 # at the distance gate -- correctly, since there is nothing within τ -- and that
 # abstention tells the reader their corpus does not cover the question, when
@@ -82,22 +113,29 @@ EMPTY_CORPUS_NOTICE = (
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
 
 
-def card_label(chunk: RetrievedChunk) -> str:
-    """The shared Evidence card, as this surface has to write it onto a widget.
+def as_written(text: str) -> str:
+    """`text` as itself, once a Markdown widget has read it.
 
-    Streamlit reads a widget label as Markdown, and a Locator is arbitrary text
-    from someone's headings: the corpus carries thirty Locators containing an
-    asterisk today, and a heading with two of them, or with brackets around a
-    word, would be typeset rather than shown. The terminal prints the same
-    string literally, so the page would be describing one Evidence differently
-    from the other surface -- which is the drift presentation.py exists to
+    Streamlit reads a widget label and a caption as Markdown, and nearly
+    everything this page shows is arbitrary text out of someone's corpus: a
+    Locator taken from their headings, a Source type they typed at the command
+    line. The corpus carries thirty Locators containing an asterisk today, and
+    a heading with two of them -- or a Source type with an underscore either
+    side -- would be typeset rather than shown. The terminal prints the same
+    strings literally, so the page would be describing one Evidence differently
+    from the other surface, which is the drift presentation.py exists to
     prevent (#22).
 
     Escaped here rather than worded around there: what a card says is
     presentation.py's, and getting a plain string intact onto a widget is this
     surface's own business, as the terminal's bullet is its.
     """
-    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", evidence_card(chunk))
+    return _MARKDOWN_PUNCTUATION.sub(r"\\\1", text)
+
+
+def card_label(chunk: RetrievedChunk) -> str:
+    """The shared Evidence card, as this surface has to write it onto a widget."""
+    return as_written(evidence_card(chunk))
 
 
 @dataclass(frozen=True)
@@ -196,9 +234,18 @@ def render_page() -> None:
     # exist, and read before anything is typed -- so the emptiness is reported
     # rather than discovered by embedding a question and interpreting the
     # abstention that comes back.
+    #
+    # Returned from before the sidebar as well as before the chat input: there
+    # is nothing to scope and no corpus to summarise, and a Scope menu over an
+    # empty corpus would offer the reader a way to narrow nothing.
     if not dependencies.registry.list():
         st.warning(EMPTY_CORPUS_NOTICE)
         return
+
+    # Read before anything is drawn from it, because the Scope is a setting the
+    # session sits under rather than an argument to one question: what comes
+    # back is what the menus say now, however many questions ago they were set.
+    chunk_filter = render_sidebar(dependencies.registry)
 
     turns = session_turns()
 
@@ -238,6 +285,11 @@ def render_page() -> None:
             dependencies.generator,
             top_k=TOP_K,
             distance_threshold=dependencies.distance_threshold,
+            # The Scope the sidebar is showing, applied inside the query by the
+            # filtered retrieval built in #5 -- nothing here narrows anything
+            # itself. It travels back on the Answer, which is what lets the
+            # turn below say what it was answered under.
+            chunk_filter=chunk_filter,
             max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
         )
 
@@ -247,6 +299,94 @@ def render_page() -> None:
     turn = Turn(question=question, answer=answer)
     turns.append(turn)
     render_answer(turn.answer)
+
+
+def render_sidebar(registry: Registry) -> ChunkFilter:
+    """The Scope in force, as a visible setting rather than a remembered flag.
+
+    Returns what the two menus say and acts on none of it: the page is a front
+    end for the filtered retrieval and the per-Document Evidence cap built in
+    #5, so a ChunkFilter goes to `ask` and nothing is narrowed here.
+
+    The two menus read from different places, and that is the design rather
+    than an inconsistency. Domains are declared configuration, so that menu is
+    DOMAINS entire -- including a Domain nothing has been ingested under, which
+    the summary below then explains. Source type is an open enumeration whose
+    values are whatever has been ingested (CONTEXT.md), so that menu is the
+    registry's own values, and becomes a real choice the moment a second Source
+    type arrives with no edit here.
+
+    Streamlit holds a keyed widget's selection across runs, which is the whole
+    of what makes a restriction stay in force until it is changed: this is
+    drawn afresh on every rerun and hands back what was chosen however many
+    questions ago.
+    """
+    with st.sidebar:
+        st.header(SCOPE_HEADER)
+        domain = st.selectbox(
+            DOMAIN_LABEL,
+            [None, *DOMAINS],
+            format_func=lambda domain: ANY_DOMAIN if domain is None else domain,
+            key=DOMAIN_KEY,
+        )
+        source_type = st.selectbox(
+            SOURCE_TYPE_LABEL,
+            [None, *registry.source_types()],
+            format_func=lambda source_type: (
+                ANY_SOURCE_TYPE if source_type is None else source_type
+            ),
+            key=SOURCE_TYPE_KEY,
+        )
+        st.markdown(corpus_summary(registry))
+
+    return ChunkFilter(domain=domain, source_type=source_type)
+
+
+def corpus_summary(registry: Registry) -> str:
+    """What the corpus holds, so the reader knows what they are querying before
+    they blame retrieval.
+
+    Read off the Document registry, which is ADR-0001's authority on what
+    Documents exist. The vector store holds one particular chunking of those
+    Documents, so a count taken there would report a single long note as a
+    large corpus -- and this sits beside the menus a reader is about to narrow
+    with, where that would mislead most.
+    """
+    return "\n".join(
+        [f"**{CORPUS_HEADER}**", "", DOMAIN_COUNTS_HEADING]
+        + [
+            domain_count_line(domain, documents)
+            for domain, documents in registry.documents_per_domain().items()
+        ]
+        + ["", source_types_line(registry.source_types())]
+    )
+
+
+def domain_count_line(domain: str, documents: int) -> str:
+    """One Domain of the corpus summary: the Domain, and how many Documents.
+
+    The Domain is escaped and the bullet is not, which is the split every line
+    of this summary has: the wording around a value is written here as Markdown
+    and meant as Markdown, while the value itself came out of the registry and
+    is only ever text (`as_written`).
+    """
+    return f"- {as_written(domain)}: {documents}"
+
+
+def source_types_line(source_types: list[str]) -> str:
+    """The Source types the corpus holds, as one line.
+
+    One line rather than a list of its own, because while the corpus holds a
+    single Source type this is read as "is there anything here but my notes
+    yet?" -- and that answer is a word, not a bullet.
+
+    Each value escaped for the same reason a card's is: a Source type is
+    whatever was typed at the command line, and one carrying Markdown
+    punctuation would be typeset in this sidebar while appearing literally on
+    the cards below it.
+    """
+    present = ", ".join(as_written(source_type) for source_type in source_types)
+    return f"Source types present: {present}"
 
 
 def render_turn(turn: Turn) -> None:
@@ -268,8 +408,30 @@ def render_question(question: str) -> None:
         st.markdown(question)
 
 
+def scope_caption(chunk_filter: ChunkFilter) -> str:
+    """The Scope one turn was answered under, as that turn says it.
+
+    Written over the ChunkFilter the Answer carries and never over the menus,
+    which is what makes a session honest to scroll back through: a caption read
+    off the sidebar would relabel every turn on screen the moment the reader
+    moved the filter, and a turn answered across the whole corpus would come to
+    claim it had been scoped.
+
+    The restriction itself is presentation.py's wording -- the terminal names
+    the same one beside a gate Abstention -- and only the framing around it,
+    and getting it onto a widget intact, belong to this surface: a caption is
+    read as Markdown, and a Source type is arbitrary text (`as_written`).
+    """
+    return as_written(f"Scope: {describe_filter(chunk_filter) or WHOLE_CORPUS}")
+
+
 def render_answer(answer: Answer) -> None:
-    """One Answer as the page reads it: the text, then the Evidence behind it.
+    """One Answer as the page reads it: the Scope, the text, then the Evidence.
+
+    The Scope leads, because it is the frame the rest is read inside: an answer
+    from "my own dsa notes" and an answer from the whole corpus are different
+    claims, and a reader who learns which one this was only after reading it
+    has already read it wrongly.
 
     One card per Chunk of the Evidence and none besides. A card is the only
     place a Document appears by name, so a card drawn from the corpus rather
@@ -285,6 +447,7 @@ def render_answer(answer: Answer) -> None:
     answer above it is model prose, which is written to be rendered.
     """
     with st.chat_message("assistant"):
+        st.caption(scope_caption(answer.chunk_filter))
         st.markdown(answer.text)
         for chunk in answer.evidence:
             # The card says what the Chunk is; the expander is how a page

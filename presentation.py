@@ -22,8 +22,8 @@ from core.store import ChunkFilter, RetrievedChunk
 
 
 def evidence_card(chunk: RetrievedChunk) -> str:
-    """One Evidence Chunk as the reader judges it: Document title, Source type,
-    Locator.
+    """One Evidence Chunk as the reader judges it: Document title, Domain,
+    Source type, Locator.
 
     One card per Chunk of the Evidence and none besides, which is what makes
     the cards report the answer's real footing: a question scoped to one Domain
@@ -36,8 +36,17 @@ def evidence_card(chunk: RetrievedChunk) -> str:
     heading path today and a page or an anchor as PLAN.md §五 lands, and a card
     that called it a "section" would go wrong the day the first paper is cited
     (CONTEXT.md).
+
+    The Domain is named beside the Source type because a question asked under
+    no Domain restriction can be answered from the wrong subject, and the card
+    is the only place that shows: an ambiguous term is the case this is for --
+    "tree" retrieves a dsa note and a network one, and nothing else on the page
+    would say which was read. Named on the card rather than only where a
+    surface has room for it, for the reason every other field here is: two
+    surfaces describing one Evidence differently is a corpus the reader cannot
+    check.
     """
-    return f"{chunk.title} ({chunk.source_type}) — {chunk.locator}"
+    return f"{chunk.title} ({chunk.domain}, {chunk.source_type}) — {chunk.locator}"
 
 
 def describe_filter(chunk_filter: ChunkFilter) -> str:
