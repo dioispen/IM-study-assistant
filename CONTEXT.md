@@ -102,6 +102,23 @@ correct outcome on a Trap question and a failure on any other; both rates are
 tracked, because either one alone can be gamed.
 _Avoid_: refusal, fallback, no-answer
 
+## A sitting with the system
+
+**Turn**:
+One question together with the Answer it produced — the record of what
+happened, not the pixels it drew. Everything a surface shows of a turn is
+derived from it, so a turn scrolled back to reads as what happened rather than
+as what the settings in force now would produce.
+_Avoid_: message, exchange, entry, item
+
+**Session**:
+One sitting at the page: the Turns asked so far, in the order they were asked.
+Display-only — no part of it reaches retrieval, so a question asked late in a
+session is retrieved exactly as it would have been had it been asked first.
+Lasts as long as the page is open, and is not a Corpus: nothing said in it is
+ever something an Answer may cite.
+_Avoid_: conversation, thread, chat, history
+
 ## Evaluation
 
 **Gold Document**:

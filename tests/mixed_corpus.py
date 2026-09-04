@@ -65,6 +65,14 @@ GATE_TAU = 0.70
 COVERED_QUESTION = "bucket collision chaining probing keys"
 OUT_OF_CORPUS_TRAP = "sourdough fermentation crumb proofing baguette"
 
+# A second covered question, for the suites that ask more than once in a sitting
+# (#24). Matched at the same five content words, and covered by the os side of
+# the corpus rather than the dsa side -- so the two questions retrieve different
+# Evidence, and "each turn kept its own cards" is a claim two unlike card lists
+# make rather than one list counted twice. Pinned by
+# `test_the_second_covered_question_reads_its_own_evidence` in test_app_seam.py.
+SECOND_COVERED_QUESTION = "page fault frame resident disk"
+
 
 def ingest_mixed(tmp_path):
     """Four ingest runs, one per (Domain, Source type) folder.

@@ -1,4 +1,5 @@
-"""The page: a question typed in, the answer, and the Evidence it rests on.
+"""The page: a revision session of questions, answers, and the Evidence they
+rest on.
 
 The second of the two surfaces over one pipeline. It is an adapter and nothing
 more -- it composes the same embedder, store, retriever, gate and generator the
@@ -40,6 +41,20 @@ from presentation import evidence_card
 TITLE = "IM Study Assistant"
 
 QUESTION_PROMPT = "Ask a question about your notes"
+
+# Where the session's turns live between runs. Streamlit re-executes this
+# script on every interaction, so a list held in a module-level name would be
+# one reader's session shown to whoever opened the page next; session state is
+# per-session, and is the only thing here that outlives a run.
+TURNS_KEY = "turns"
+
+# Ends a topic without scrolling past the last one. Named for what it does to
+# the session rather than to the screen -- what goes is the record, and the
+# page redrawing empty is a consequence of that.
+#
+# Not in presentation.py, for the reason EMPTY_CORPUS_NOTICE is not: that module
+# holds what *both* surfaces show, and the terminal has no session to clear.
+CLEAR_LABEL = "Clear session"
 
 # Shown while the question is being answered, and left on the page afterwards
 # as the record of that having happened. A slow retrieval must be readable as
@@ -136,6 +151,42 @@ def build_dependencies() -> Dependencies:
     )
 
 
+@dataclass(frozen=True)
+class Turn:
+    """One question the session keeps, together with the Answer it produced.
+
+    Everything a turn is drawn from is in here, and drawing one is a pure
+    function of it. That is what makes a session redisplayed rather than
+    re-derived: the Scope a question was answered under travels on its Answer
+    (core/ask.py), so a turn scrolled back to once the sidebar can move the
+    Scope mid-session (#25) still reads as the turn that happened, rather than
+    as the turn today's settings would have produced.
+
+    The Scope is therefore not copied onto the turn beside the Answer that
+    already carries it. Two places for one fact is two places to disagree, and
+    the one a card could be drawn from is the Answer's.
+    """
+
+    question: str
+    answer: Answer
+
+
+def session_turns() -> list[Turn]:
+    """The session's turns, in the order they were asked; empty on a fresh page.
+
+    The list itself rather than a copy of it, because appending a turn has to be
+    appending to the session -- Streamlit holds the object across runs, and a
+    caller that appended to a copy would have answered a question the next rerun
+    knows nothing about.
+
+    Nothing here survives a page reload, which is the intended lifetime: a
+    session is a sitting, and persistence would be a corpus of its own.
+    """
+    if TURNS_KEY not in st.session_state:
+        st.session_state[TURNS_KEY] = []
+    return st.session_state[TURNS_KEY]
+
+
 def render_page() -> None:
     st.title(TITLE)
 
@@ -149,18 +200,38 @@ def render_page() -> None:
         st.warning(EMPTY_CORPUS_NOTICE)
         return
 
+    turns = session_turns()
+
+    # Offered above the turns it clears, because a click is read on the run it
+    # triggers: a control drawn below them would empty a list that had already
+    # been rendered, and the page would go on showing a session that no longer
+    # exists until the next interaction.
+    if st.button(CLEAR_LABEL):
+        turns.clear()
+
+    for turn in turns:
+        render_turn(turn)
+
     question = st.chat_input(QUESTION_PROMPT)
     if not question:
         return
 
-    with st.chat_message("user"):
-        st.markdown(question)
+    # Drawn before the answering rather than with the turn it will belong to,
+    # so the question the reader is waiting on is on screen above the thing
+    # that says it is being worked on.
+    render_question(question)
 
     # The answering happens inside the status, so what the reader watches spin
     # is the work itself: it completes when the answer is on the page beneath
     # it, and not a moment before.
     with st.status(IN_FLIGHT_LABEL):
         answer = ask(
+            # The question as it was typed, and nothing of the session with it.
+            # What scrolls above is display-only: every question is retrieved
+            # independently, and folding what is on screen into the query here
+            # would be history-aware retrieval and query rewriting done by
+            # accident -- Week 7 experiments (PLAN.md §第 7 週), confounded
+            # before they start by a baseline that already did some of it.
             question,
             dependencies.embedder,
             dependencies.store,
@@ -170,7 +241,31 @@ def render_page() -> None:
             max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
         )
 
-    render_answer(answer)
+    # Kept before it is drawn, and drawn from what was kept: the fresh turn
+    # reaches the page by the same route it will take on every rerun after
+    # this one, rather than by a shorter one that only the newest turn takes.
+    turn = Turn(question=question, answer=answer)
+    turns.append(turn)
+    render_answer(turn.answer)
+
+
+def render_turn(turn: Turn) -> None:
+    """One kept turn, redrawn: the question as it was asked, then its Answer.
+
+    The same two halves the live question is drawn from, in the same order, so
+    a turn the reader scrolls back to is not a second rendering of the same
+    thing written twice. What the live path adds between them is the status --
+    which belongs to a question being answered now, and to no turn the session
+    has already kept.
+    """
+    render_question(turn.question)
+    render_answer(turn.answer)
+
+
+def render_question(question: str) -> None:
+    """The question in the reader's own words, as they typed it."""
+    with st.chat_message("user"):
+        st.markdown(question)
 
 
 def render_answer(answer: Answer) -> None:

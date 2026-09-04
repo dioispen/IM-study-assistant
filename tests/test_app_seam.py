@@ -31,6 +31,7 @@ from tests.mixed_corpus import (
     COVERED_QUESTION,
     GATE_TAU,
     OUT_OF_CORPUS_TRAP,
+    SECOND_COVERED_QUESTION,
     ingest_mixed,
 )
 
@@ -57,12 +58,28 @@ EXPECTED_CARDS = [
 ]
 
 
+def _nth_answer(n: int) -> str:
+    """The nth answer ScriptedGenerator gives, as it reaches the page."""
+    return f"{ANSWER} ({n})"
+
+
 class ScriptedGenerator:
     """Prose this module chose, so that "the page showed the answer" is a claim
-    about the page rather than about a model (ADR-0002)."""
+    about the page rather than about a model (ADR-0002).
+
+    Numbered, one line per question it is given, so that an answer on screen
+    says which generation produced it. That is what lets a session be read: two
+    turns are two answers rather than one answer counted twice, and an answer
+    fetched again while a kept turn was being redrawn would arrive wearing a
+    number the reader never saw.
+    """
+
+    def __init__(self):
+        self._answered = 0
 
     def generate(self, prompt: str) -> str:
-        return ANSWER
+        self._answered += 1
+        return _nth_answer(self._answered)
 
 
 class ExplodingEmbedder:
@@ -308,3 +325,108 @@ def test_an_empty_corpus_is_reported_before_a_question_is_embedded(monkeypatch, 
 
     assert page.exception == []
     assert page.chat_input == []
+
+
+def test_the_second_covered_question_reads_its_own_evidence(tmp_path):
+    # The session cases below only mean anything if the two questions really do
+    # retrieve different Evidence, and if the second is covered at all. Pin
+    # both, so a change to the fixtures or to FakeEmbedder fails here rather
+    # than quietly making a two-turn assertion a one-turn one.
+    _registry, store, embedder = ingest_mixed(tmp_path)
+    [second] = embedder.embed([SECOND_COVERED_QUESTION])
+
+    assert store.query(embedding=second, top_k=1)[0].distance < GATE_TAU
+    assert _evidence_through_the_seam(tmp_path, SECOND_COVERED_QUESTION) != (
+        _evidence_through_the_seam(tmp_path)
+    )
+
+
+def test_asking_twice_leaves_both_turns_on_screen(monkeypatch, tmp_path):
+    # A revision session rather than a series of shell invocations: the first
+    # question and its answer are still there when the second arrives, so a
+    # follow-up costs nothing but the thought behind it.
+    page = _open_page(monkeypatch, _factory(tmp_path))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+    _ask_on_the_page(page, SECOND_COVERED_QUESTION)
+
+    assert page.exception == []
+    assert COVERED_QUESTION in _shown(page)
+    assert SECOND_COVERED_QUESTION in _shown(page)
+    assert _shown(page).count(ANSWER) == 2
+
+
+def test_each_turn_keeps_the_cards_of_its_own_question(monkeypatch, tmp_path):
+    # What a turn shows is read off the turn, not off the session: the cards
+    # standing under the first answer are still the first question's Evidence
+    # after the second question has been asked and answered above -- neither
+    # redrawn from the newer question nor merged with it.
+    #
+    # Read against what the seam returns for each question on its own, so the
+    # claim is that each turn shows its own Evidence entire, in order.
+    first = _evidence_through_the_seam(tmp_path)
+    second = _evidence_through_the_seam(tmp_path, SECOND_COVERED_QUESTION)
+    page = _open_page(monkeypatch, _factory(tmp_path))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+    _ask_on_the_page(page, SECOND_COVERED_QUESTION)
+
+    assert [card.label for card in page.expander] == [
+        interface.card_label(chunk) for chunk in first + second
+    ]
+
+
+def test_a_second_question_is_retrieved_as_if_it_were_the_first(monkeypatch, tmp_path):
+    # The session is display-only: what scrolls above is not folded into the
+    # query.
+    # The trap is the case that shows it -- asked cold it abstains at the gate,
+    # and asked after a covered question it has to abstain the same way. A
+    # session that appended the first question to the second would be dragging
+    # the trap towards the corpus the first question hit, and would answer it.
+    #
+    # The first turn's cards are still the only cards on the page, which is the
+    # other half of the same claim: a gate Abstention cites nothing (ADR-0003),
+    # so the second turn contributes none.
+    page = _open_page(monkeypatch, _factory(tmp_path))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+    _ask_on_the_page(page, OUT_OF_CORPUS_TRAP)
+
+    assert page.exception == []
+    assert ABSTENTION_TEXT in _shown(page)
+    assert len(page.expander) == len(EXPECTED_CARDS)
+
+
+def test_a_clear_control_empties_the_session(monkeypatch, tmp_path):
+    # Starting a new topic without scrolling past the last one. What is gone is
+    # what was on screen -- the question, its answer and its cards -- and what
+    # stays is the page itself, ready for the next question.
+    page = _open_page(monkeypatch, _factory(tmp_path))
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    page.button[0].click().run()
+
+    assert page.exception == []
+    assert COVERED_QUESTION not in _shown(page)
+    assert ANSWER not in _shown(page)
+    assert page.expander == []
+    assert page.chat_input != []
+
+
+def test_a_kept_turn_still_shows_the_answer_it_was_given(monkeypatch, tmp_path):
+    # Drawing a turn is a pure function of the record it kept, and the numbering
+    # is what tells the two apart: a first turn redrawn from anything but its own
+    # record -- re-asked at display time, or re-answered -- comes back wearing a
+    # number the reader never saw.
+    #
+    # This is the claim #25 rests on. Once the sidebar can move the Scope
+    # mid-session, a turn re-derived while being redrawn is a turn relabelled
+    # retroactively, and nothing on the page would say so.
+    page = _open_page(monkeypatch, _factory(tmp_path))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+    _ask_on_the_page(page, SECOND_COVERED_QUESTION)
+
+    assert _nth_answer(1) in _shown(page)
+    assert _nth_answer(2) in _shown(page)
+    assert _nth_answer(3) not in _shown(page)
