@@ -18,15 +18,19 @@ is prose this module chose, so what is checked is that the page carried it, not
 what a model would have said.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import interface
+import presentation
 import pytest
-from config import DOMAINS, MAX_CHUNKS_PER_DOCUMENT, TOP_K
+from config import DISTANCE_THRESHOLD, DOMAINS, MAX_CHUNKS_PER_DOCUMENT, TOP_K
 from core.ask import ask
 from core.gate import ABSTENTION_TEXT
+from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL
 from core.registry import Registry
 from core.store import ChunkFilter, VectorStore
+from presentation import describe_filter, provisional_threshold_notice
 from streamlit.testing.v1 import AppTest
 from tests.mixed_corpus import (
     COVERED_QUESTION,
@@ -223,6 +227,7 @@ def _shown(page: AppTest) -> str:
     return "\n".join(
         [block.value for block in page.markdown]
         + [block.value for block in page.warning]
+        + [block.value for block in page.info]
     )
 
 
@@ -687,3 +692,176 @@ def test_the_sidebar_summarises_the_corpus_it_is_scoping(monkeypatch, corpus):
     for domain, documents in EXPECTED_DOCUMENTS_PER_DOMAIN.items():
         assert interface.domain_count_line(domain, documents) in summary
     assert interface.source_types_line(EXPECTED_SOURCE_TYPES) in summary
+
+
+class AbstainingGenerator:
+    """Declares the prompt backstop the one way the prompt asks for it: the
+    sentinel on its own line and nothing else (ADR-0008).
+
+    Not prose that sounds like giving up -- a model losing confidence in its
+    own words declares nothing, and its answer is an ordinary answer
+    (core/ask.py). So this double is the contract itself, and what the page is
+    shown to render is what the sentinel became rather than anything about real
+    model prose (ADR-0002).
+    """
+
+    def generate(self, prompt: str) -> str:
+        return BACKSTOP_SENTINEL
+
+
+def test_a_gate_abstention_shows_no_cards_and_never_reaches_generation(
+    monkeypatch, corpus
+):
+    # The gate abstains before generation is given anything, so there is
+    # nothing to cite -- and nothing to pay for. The generator fails the test
+    # if it is called, which is what makes "a hopeless question costs zero
+    # generation tokens" a claim about this surface rather than one inherited
+    # from the command line: moving to a page must not quietly start paying for
+    # questions the corpus cannot answer.
+    page = _open_page(monkeypatch, _factory(corpus, generator=ExplodingGenerator()))
+
+    _ask_on_the_page(page, OUT_OF_CORPUS_TRAP)
+
+    assert page.exception == []
+    assert page.expander == []
+    assert [block.value for block in page.warning] == [ABSTENTION_TEXT]
+
+
+def test_a_scoped_gate_abstention_names_the_restriction_it_was_asked_under(
+    monkeypatch, corpus
+):
+    # The abstention text speaks of "the corpus", and a scoped question
+    # abstained on the corpus it was scoped to -- so the narrowing has to be on
+    # screen beside it, or "your notes don't cover this" reads the same as "not
+    # under that Domain" when the two ask different things of the reader.
+    #
+    # Asserted as the restriction's wording standing beside the abstention
+    # rather than as one particular widget carrying it: what the page owes the
+    # reader is that the narrowing is visible, and the turn's own Scope caption
+    # (#25) is where this page says it.
+    page = _open_page(monkeypatch, _factory(corpus, generator=ExplodingGenerator()))
+
+    _scope_the_session(page, domain="dsa")
+    _ask_on_the_page(page, OUT_OF_CORPUS_TRAP)
+
+    assert page.exception == []
+    restriction = describe_filter(ChunkFilter(domain="dsa"))
+    assert any(restriction in caption.value for caption in page.caption)
+
+
+def test_a_backstop_abstention_keeps_the_evidence_it_was_judged_from(
+    monkeypatch, corpus
+):
+    # The backstop fired over Evidence that was assembled and handed over, so
+    # the cards are exactly the material the model judged insufficient -- and
+    # this is the one case where the reader wants to look at that Evidence
+    # themselves and disagree (#21). Read against what the seam returns for the
+    # same question, so the page is shown to keep all of it and add nothing.
+    evidence = _evidence_through_the_seam(corpus)
+    page = _open_page(monkeypatch, _factory(corpus, generator=AbstainingGenerator()))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert page.exception == []
+    assert BACKSTOP_ABSTENTION_TEXT in _shown(page)
+    assert [card.label for card in page.expander] == [
+        interface.card_label(chunk) for chunk in evidence
+    ]
+
+
+def test_a_backstop_abstention_shows_the_reader_no_contract_token(monkeypatch, corpus):
+    # The sentinel is a contract between the prompt and the pipeline and never
+    # leaves it (core/ask.py). A page showing it would be a page that had read
+    # generated text to work out what happened.
+    page = _open_page(monkeypatch, _factory(corpus, generator=AbstainingGenerator()))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert BACKSTOP_SENTINEL not in _shown(page)
+
+
+def test_the_two_abstentions_are_told_apart_by_more_than_their_wording(
+    monkeypatch, corpus
+):
+    # ADR-0003's two layers, made observable on the page: one branch, opposite
+    # renderings. The gate's abstention is a warning with nothing beneath it;
+    # the backstop's is an informational note with its cards intact. A reader
+    # tells them apart by the shape of the turn rather than by reading either
+    # text closely -- and a two-layer design nobody can observe on screen is a
+    # layer nobody can tell is broken.
+    gated = _open_page(monkeypatch, _factory(corpus, generator=ExplodingGenerator()))
+    _ask_on_the_page(gated, OUT_OF_CORPUS_TRAP)
+    gated_warnings = [block.value for block in gated.warning]
+    gated_notes = [block.value for block in gated.info]
+    gated_cards = list(gated.expander)
+
+    backstopped = _open_page(
+        monkeypatch, _factory(corpus, generator=AbstainingGenerator())
+    )
+    _ask_on_the_page(backstopped, COVERED_QUESTION)
+
+    assert gated_warnings == [ABSTENTION_TEXT]
+    assert gated_notes == []
+    assert gated_cards == []
+
+    assert [block.value for block in backstopped.info] == [BACKSTOP_ABSTENTION_TEXT]
+    assert backstopped.warning == []
+    assert backstopped.expander != []
+
+
+def test_an_ordinary_answer_is_not_dressed_as_an_abstention(monkeypatch, corpus):
+    # The other half of the claim above: the callouts belong to the two
+    # Abstentions, so an answer the system stands behind is not framed as one.
+    # A gate Abstention that read as a weak answer, and an answer that read as
+    # an Abstention, both leave the reader unable to tell what the system did.
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert ANSWER in _shown(page)
+    assert page.warning == []
+    assert page.info == []
+
+
+def test_the_provisional_tau_notice_stands_beside_a_gate_abstention(monkeypatch, corpus):
+    # An Abstention is the one moment an underived tau visibly costs the reader
+    # an answer, so that is where the gate admits it is uncalibrated. What the
+    # notice says is presentation.py's business (test_presentation.py); what is
+    # asserted here is that this surface shows it, as the aside it is, and has
+    # nothing of its own to say once there is no notice to show.
+    #
+    # That an ordinary answer carries no notice is already said by the exact
+    # caption lists in the Scope tests above.
+    page = _open_page(monkeypatch, _factory(corpus, generator=ExplodingGenerator()))
+
+    _ask_on_the_page(page, OUT_OF_CORPUS_TRAP)
+
+    captions = [caption.value for caption in page.caption]
+    notice = provisional_threshold_notice()
+    if notice is None:
+        assert not any("tau=" in caption for caption in captions)
+    else:
+        assert interface.as_written(notice) in captions
+
+
+def test_a_derived_tau_leaves_this_page_with_no_notice_to_show(monkeypatch, corpus):
+    # The Week 6 sweep flipping the flag in config.py has to be the only edit
+    # (#22), so the notice is read off the configured threshold rather than
+    # restated here -- a literal copy of today's wording would survive this and
+    # outlive the condition it describes. The Abstention itself is untouched:
+    # what goes is the admission, not the refusal, and what is left beside it is
+    # the turn's Scope and nothing else.
+    monkeypatch.setattr(
+        presentation,
+        "DISTANCE_THRESHOLD",
+        replace(DISTANCE_THRESHOLD, provisional=False),
+    )
+    page = _open_page(monkeypatch, _factory(corpus, generator=ExplodingGenerator()))
+
+    _ask_on_the_page(page, OUT_OF_CORPUS_TRAP)
+
+    assert page.exception == []
+    assert [block.value for block in page.warning] == [ABSTENTION_TEXT]
+    assert [caption.value for caption in page.caption] == [
+        interface.scope_caption(ChunkFilter())
+    ]

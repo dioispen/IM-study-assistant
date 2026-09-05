@@ -32,12 +32,16 @@ from config import (
     REGISTRY_PATH,
     TOP_K,
 )
-from core.ask import Answer, ask
+from core.ask import Abstention, Answer, ask
 from core.embedder import Embedder, OpenAIEmbedder
 from core.generator import Generator, OpenAIGenerator
 from core.registry import Registry
 from core.store import ChunkFilter, RetrievedChunk, VectorStore
-from presentation import describe_filter, evidence_card
+from presentation import (
+    describe_filter,
+    evidence_card,
+    provisional_threshold_notice,
+)
 
 TITLE = "IM Study Assistant"
 
@@ -433,6 +437,19 @@ def render_answer(answer: Answer) -> None:
     claims, and a reader who learns which one this was only after reading it
     has already read it wrongly.
 
+    Which layer declined, if either, is read off the Answer rather than
+    recognised in its wording -- the pipeline already decided, and a surface
+    that decided again could disagree with it (core/ask.py). The branch below
+    asks which layer fired rather than whether any did, because the two
+    Abstentions are different things: the gate's cites nothing and the
+    backstop's cites the Evidence the model judged insufficient, and they call
+    for different responses from the reader (ADR-0003, #26).
+
+    Each of the three lands in a widget of its own -- a warning, an
+    informational note, plain prose -- so the difference is in the shape of the
+    turn rather than in wording the reader has to compare. A two-layer design
+    nobody can observe on screen is a layer nobody can tell is broken.
+
     One card per Chunk of the Evidence and none besides. A card is the only
     place a Document appears by name, so a card drawn from the corpus rather
     than from this Answer's Evidence would credit the answer to a Document
@@ -448,7 +465,41 @@ def render_answer(answer: Answer) -> None:
     """
     with st.chat_message("assistant"):
         st.caption(scope_caption(answer.chunk_filter))
-        st.markdown(answer.text)
+
+        if answer.abstention is Abstention.DISTANCE_GATE:
+            # Nothing came back within τ, so generation was never given
+            # anything and there is nothing to cite. The branch is what makes
+            # that visible rather than incidental: an Answer whose Evidence
+            # happened to be empty would draw no cards either, and the reader
+            # would be left to infer from an absence.
+            st.warning(answer.text)
+            # An Abstention is the one moment an underived τ visibly costs the
+            # reader an answer, so this is where the gate admits it is
+            # uncalibrated. Whether there is anything to admit is the
+            # threshold's own business (presentation.py); a caption beneath the
+            # refusal is how this surface says an aside, as the terminal's
+            # parentheses are its.
+            notice = provisional_threshold_notice()
+            if notice:
+                st.caption(as_written(notice))
+            # The restriction the question was narrowed to is named by the
+            # Scope caption above, which every turn carries (#25) -- so nothing
+            # is repeated here. The terminal prints its own restriction line
+            # because it has no per-answer Scope of its own to read.
+            return
+
+        if answer.abstention is Abstention.PROMPT_BACKSTOP:
+            # Evidence was assembled, handed over and judged insufficient, and
+            # the cards below are exactly that material -- which is the one
+            # case where the reader wants to look at it and disagree. A
+            # different callout from the gate's, because the two Abstentions
+            # ask different things of the reader: go and find material, against
+            # read what was found and judge it. Told apart by the shape of the
+            # turn rather than by reading either text closely (ADR-0003).
+            st.info(answer.text)
+        else:
+            st.markdown(answer.text)
+
         for chunk in answer.evidence:
             # The card says what the Chunk is; the expander is how a page
             # offers to open one.
