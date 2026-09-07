@@ -35,6 +35,7 @@ from config import (
 from core.ask import Abstention, Answer, ask
 from core.embedder import Embedder, OpenAIEmbedder
 from core.generator import Generator, OpenAIGenerator
+from core.openai_client import ProviderFailure
 from core.registry import Registry
 from core.store import ChunkFilter, RetrievedChunk, VectorStore
 from presentation import (
@@ -87,6 +88,62 @@ SOURCE_TYPE_LABEL = "Source type"
 ANY_DOMAIN = "Any Domain"
 ANY_SOURCE_TYPE = "Any Source type"
 
+# The two knobs a student can meaningfully turn while reading, beneath the
+# Scope and distinct from it: the Scope decides what a question may be answered
+# from, and these decide how much of it comes back. Headed for what they do
+# rather than for who turns them -- "advanced" describes the reader, and a
+# reader deciding whether to open a heading is better served by the subject.
+#
+# Not folded into an expander, though that is where advanced settings usually
+# go: an expander on this page is how a card opens onto its Chunk, and a second
+# kind of expander would cost the reader the one thing that made the cards
+# recognisable at a glance.
+EVIDENCE_HEADER = "How much Evidence"
+
+# Each control is keyed by the `ask` parameter it fills, exactly as each menu
+# above is keyed by the ChunkFilter field it fills, and for the same reason:
+# nothing anywhere translates a widget's name into an argument's.
+TOP_K_KEY = "top_k"
+MAX_PER_DOCUMENT_KEY = "max_chunks_per_document"
+
+TOP_K_LABEL = "Chunks retrieved"
+MAX_PER_DOCUMENT_LABEL = "Most Chunks from one Document"
+
+TOP_K_HELP = (
+    "How many Chunks are retrieved for a question and handed to the answer as "
+    "its Evidence — one card each."
+)
+MAX_PER_DOCUMENT_HELP = (
+    "The most Chunks any single Document may contribute. Lower it to see "
+    "whether an answer rests on several Documents or on one long note "
+    "crowding the others out."
+)
+
+# The furthest either control may be turned. Every Chunk retrieved is prompt
+# tokens spent and one more card to read, and past a point the Evidence is
+# longer than the reader will actually check -- which is the opposite of what
+# the cards are for.
+#
+# Derived from the configured values rather than written as its own number, and
+# from both of them: a ceiling beneath a value a control defaults to is a page
+# that cannot draw its own defaults, and Streamlit refuses the widget outright
+# rather than clamping it. The larger cap is not hypothetical -- a cap well
+# above top-k is exactly the non-binding baseline the Week 7 diversity sweep
+# reads against (PLAN.md §第 7 週), so config.py carrying one has to leave this
+# page standing.
+#
+# It is also what makes uncapped retrieval reachable here without the command
+# line's `--max-per-document off`: a cap at or above the top-k in force binds
+# nothing, so that baseline can be set on the page by raising the cap rather
+# than by a sentinel value the reader would have to be taught.
+MAX_RETRIEVED = max(4 * TOP_K, MAX_CHUNKS_PER_DOCUMENT)
+
+# The smallest either may be turned to. A cap of zero admits no Chunk of any
+# Document, so every question would abstain as though the corpus were empty --
+# the abstention core/retriever.py refuses to serve, refused here before it can
+# be typed rather than raised after it has been.
+MIN_RETRIEVED = 1
+
 CORPUS_HEADER = "In the corpus"
 DOMAIN_COUNTS_HEADING = "Documents per Domain:"
 
@@ -109,6 +166,29 @@ EMPTY_CORPUS_NOTICE = (
     "The corpus is empty — no Document has been ingested yet, so there is "
     "nothing to answer from. Ingest a folder of notes first: "
     "`python cli.py ingest <folder> --domain <domain>`."
+)
+
+# What an operational failure says: the language model could not be reached, so
+# nothing here is a claim about the corpus. A missing key and a provider outage
+# share one wording, because the reader's question in both cases is the same
+# one -- "is this my notes or my setup?" -- and the provider's own words below
+# are what separate them.
+#
+# Said in as many words rather than left to a red box, because the failure this
+# is guarding against is not an ugly traceback but a misread one: a
+# configuration problem that looks like a knowledge gap teaches the reader
+# their corpus is worse than it is. Neither of ADR-0003's Abstentions is on
+# screen here, and this says so.
+#
+# Not in presentation.py: that module holds what *both* surfaces show, and the
+# terminal does not catch this yet -- a traceback in a console is a diagnosis,
+# while on a page it is a dead end. The day cli.py catches it too, the wording
+# moves there and this becomes the framing around it, as the cards' is.
+PROVIDER_FAILURE_NOTICE = (
+    "The language model could not be reached, so nothing can be answered "
+    "right now. That is a configuration or provider problem rather than "
+    "anything your notes do or do not say — it is neither an answer nor an "
+    "Abstention. What went wrong: {detail}"
 )
 
 
@@ -194,6 +274,30 @@ def build_dependencies() -> Dependencies:
 
 
 @dataclass(frozen=True)
+class Retrieval:
+    """What the sidebar settles about the next question, in one value.
+
+    The Scope it may be answered from, and how much Evidence may come back.
+    Three fields named for the three `ask` parameters they fill, so the page
+    hands the pipeline what the reader set rather than translating it, and a
+    fourth control added to the sidebar arrives here rather than as a fourth
+    return value threaded through the same functions.
+
+    τ is not among them, and that is the design (ADR-0003). The other three are
+    plain arguments to retrieval -- a preference about how much Evidence to
+    look at -- while τ is a property of the embedding model, carried in a
+    DistanceThreshold that refuses to be read without naming the model it was
+    set for. A widget can hand `ask` an int; nothing can hand it a paired
+    float, which is why the threshold reaches the page on Dependencies beside
+    the embedder instead.
+    """
+
+    chunk_filter: ChunkFilter
+    top_k: int
+    max_chunks_per_document: int
+
+
+@dataclass(frozen=True)
 class Turn:
     """One question the session keeps, together with the Answer it produced.
 
@@ -232,7 +336,29 @@ def session_turns() -> list[Turn]:
 def render_page() -> None:
     st.title(TITLE)
 
-    dependencies = build_dependencies()
+    try:
+        dependencies = build_dependencies()
+    except ProviderFailure as failure:
+        # The missing-key case, and every other way the provider cannot be
+        # reached before a question is typed: the clients are constructed here,
+        # so this is a page that fails while it is being opened. Reported and
+        # returned from, because there is nothing behind it to draw -- a chat
+        # input over dependencies that do not exist is an invitation to type
+        # into a page that cannot answer.
+        #
+        # Not the threshold-to-embedding-model misconfiguration, which
+        # build_dependencies asserts first and raises RuntimeError for: that is
+        # not a hiccup to render politely, and ProviderFailure is not one of its
+        # ancestors, so this clause cannot catch it (core/openai_client.py).
+        #
+        # A fresh checkout with no key reaches this before the empty-corpus
+        # notice below, because the clients are built before the registry is
+        # read -- so the reader is told about the key when what they have to do
+        # next is ingest their notes. #31 moves the registry read ahead of the
+        # client construction, and this message stays for the case it is really
+        # about; nothing here needs to change when it does.
+        render_provider_failure(failure)
+        return
 
     # Read off the registry, which is ADR-0001's authority on what Documents
     # exist, and read before anything is typed -- so the emptiness is reported
@@ -246,10 +372,10 @@ def render_page() -> None:
         st.warning(EMPTY_CORPUS_NOTICE)
         return
 
-    # Read before anything is drawn from it, because the Scope is a setting the
-    # session sits under rather than an argument to one question: what comes
-    # back is what the menus say now, however many questions ago they were set.
-    chunk_filter = render_sidebar(dependencies.registry)
+    # Read before anything is drawn from it, because these are settings the
+    # session sits under rather than arguments to one question: what comes back
+    # is what the sidebar says now, however many questions ago it was set.
+    retrieval = render_sidebar(dependencies.registry)
 
     turns = session_turns()
 
@@ -275,27 +401,41 @@ def render_page() -> None:
     # The answering happens inside the status, so what the reader watches spin
     # is the work itself: it completes when the answer is on the page beneath
     # it, and not a moment before.
-    with st.status(IN_FLIGHT_LABEL):
-        answer = ask(
-            # The question as it was typed, and nothing of the session with it.
-            # What scrolls above is display-only: every question is retrieved
-            # independently, and folding what is on screen into the query here
-            # would be history-aware retrieval and query rewriting done by
-            # accident -- Week 7 experiments (PLAN.md §第 7 週), confounded
-            # before they start by a baseline that already did some of it.
-            question,
-            dependencies.embedder,
-            dependencies.store,
-            dependencies.generator,
-            top_k=TOP_K,
-            distance_threshold=dependencies.distance_threshold,
-            # The Scope the sidebar is showing, applied inside the query by the
-            # filtered retrieval built in #5 -- nothing here narrows anything
-            # itself. It travels back on the Answer, which is what lets the
-            # turn below say what it was answered under.
-            chunk_filter=chunk_filter,
-            max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
-        )
+    #
+    # The catch is outside the status rather than inside it, so a question the
+    # provider failed on leaves the status showing an error rather than
+    # completing over a failure -- st.status reads the exception on its way out
+    # and does not swallow it.
+    try:
+        with st.status(IN_FLIGHT_LABEL):
+            answer = ask(
+                # The question as it was typed, and nothing of the session with
+                # it. What scrolls above is display-only: every question is
+                # retrieved independently, and folding what is on screen into
+                # the query here would be history-aware retrieval and query
+                # rewriting done by accident -- Week 7 experiments (PLAN.md §第
+                # 7 週), confounded before they start by a baseline that
+                # already did some of it.
+                question,
+                dependencies.embedder,
+                dependencies.store,
+                dependencies.generator,
+                # What the sidebar is set to, passed straight through: the page
+                # is a front end for the retrieval built in #5 and reimplements
+                # none of it. The Scope travels back on the Answer, which is
+                # what lets the turn below say what it was answered under.
+                top_k=retrieval.top_k,
+                distance_threshold=dependencies.distance_threshold,
+                chunk_filter=retrieval.chunk_filter,
+                max_chunks_per_document=retrieval.max_chunks_per_document,
+            )
+    except ProviderFailure as failure:
+        # Embedding or generation could not be reached. Nothing is kept and
+        # nothing is drawn as an answer: there is no Answer, so there is no
+        # Turn to keep (CONTEXT.md), and cards under an error message would be
+        # citing Evidence for an answer that was never produced.
+        render_provider_failure(failure)
+        return
 
     # Kept before it is drawn, and drawn from what was kept: the fresh turn
     # reaches the page by the same route it will take on every rerun after
@@ -305,12 +445,14 @@ def render_page() -> None:
     render_answer(turn.answer)
 
 
-def render_sidebar(registry: Registry) -> ChunkFilter:
-    """The Scope in force, as a visible setting rather than a remembered flag.
+def render_sidebar(registry: Registry) -> Retrieval:
+    """The Scope and the retrieval in force, as visible settings rather than
+    remembered flags.
 
-    Returns what the two menus say and acts on none of it: the page is a front
+    Returns what the sidebar says and acts on none of it: the page is a front
     end for the filtered retrieval and the per-Document Evidence cap built in
-    #5, so a ChunkFilter goes to `ask` and nothing is narrowed here.
+    #5, so a Retrieval goes to `ask` and nothing is narrowed, ranked or capped
+    here.
 
     The two menus read from different places, and that is the design rather
     than an inconsistency. Domains are declared configuration, so that menu is
@@ -320,10 +462,17 @@ def render_sidebar(registry: Registry) -> ChunkFilter:
     registry's own values, and becomes a real choice the moment a second Source
     type arrives with no edit here.
 
-    Streamlit holds a keyed widget's selection across runs, which is the whole
-    of what makes a restriction stay in force until it is changed: this is
-    drawn afresh on every rerun and hands back what was chosen however many
-    questions ago.
+    Beneath them, the two controls that decide how much Evidence comes back
+    rather than what it may be drawn from. They default to the configured
+    values, so a page nobody has touched answers exactly as the command line
+    does with no flags -- these are a way to depart from the configuration, not
+    a second place it is written down. τ is not among them, for the reason
+    Retrieval gives.
+
+    Streamlit holds a keyed widget's value across runs, which is the whole of
+    what makes any of this stay in force until it is changed: this is drawn
+    afresh on every rerun and hands back what was set however many questions
+    ago.
     """
     with st.sidebar:
         st.header(SCOPE_HEADER)
@@ -341,9 +490,36 @@ def render_sidebar(registry: Registry) -> ChunkFilter:
             ),
             key=SOURCE_TYPE_KEY,
         )
+
+        # Beneath the Scope, because they are read in that order: what a
+        # question may be answered from, and then how much of it to look at.
+        st.subheader(EVIDENCE_HEADER)
+        top_k = st.number_input(
+            TOP_K_LABEL,
+            min_value=MIN_RETRIEVED,
+            max_value=MAX_RETRIEVED,
+            value=TOP_K,
+            step=1,
+            help=TOP_K_HELP,
+            key=TOP_K_KEY,
+        )
+        max_chunks_per_document = st.number_input(
+            MAX_PER_DOCUMENT_LABEL,
+            min_value=MIN_RETRIEVED,
+            max_value=MAX_RETRIEVED,
+            value=MAX_CHUNKS_PER_DOCUMENT,
+            step=1,
+            help=MAX_PER_DOCUMENT_HELP,
+            key=MAX_PER_DOCUMENT_KEY,
+        )
+
         st.markdown(corpus_summary(registry))
 
-    return ChunkFilter(domain=domain, source_type=source_type)
+    return Retrieval(
+        chunk_filter=ChunkFilter(domain=domain, source_type=source_type),
+        top_k=top_k,
+        max_chunks_per_document=max_chunks_per_document,
+    )
 
 
 def corpus_summary(registry: Registry) -> str:
@@ -505,3 +681,34 @@ def render_answer(answer: Answer) -> None:
             # offers to open one.
             with st.expander(card_label(chunk)):
                 st.text(chunk.text)
+
+
+def provider_failure_notice(failure: ProviderFailure) -> str:
+    """An operational failure as the page puts it to the reader.
+
+    The provider's own words are kept and framed rather than replaced: they are
+    the half that says what to do next -- "set the OPENAI_API_KEY environment
+    variable" is an instruction, and a page that summarised it into "something
+    went wrong" would leave the reader with nothing to act on.
+
+    Escaped, and only there: the framing is written here as Markdown and meant
+    as Markdown, while the detail arrived from outside and is only ever text
+    (`as_written`). The missing-key message is exactly why -- it names an
+    environment variable underscored either side, and a page that let that be
+    typeset would show the reader a variable name they cannot set.
+    """
+    return PROVIDER_FAILURE_NOTICE.format(detail=as_written(str(failure)))
+
+
+def render_provider_failure(failure: ProviderFailure) -> None:
+    """The failure, in the one widget neither Abstention uses.
+
+    An error rather than the gate's warning or the backstop's informational
+    note, because the reader's first question is which of the three happened:
+    the corpus does not cover this, the Evidence did not support it, or the
+    system never got as far as asking. Three renderings for three outcomes, as
+    the two Abstentions already are (ADR-0003) -- and a failure that borrowed
+    an Abstention's shape would be the misconfiguration-as-knowledge-gap this
+    exists to prevent.
+    """
+    st.error(provider_failure_notice(failure))

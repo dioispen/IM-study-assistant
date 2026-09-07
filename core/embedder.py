@@ -6,7 +6,7 @@ import hashlib
 import math
 from typing import Protocol
 
-from core.openai_client import default_openai_client
+from core.openai_client import default_openai_client, provider_failures
 from core.tokenization import tokenize
 
 
@@ -20,7 +20,13 @@ class OpenAIEmbedder:
         self._model = model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        response = self._client.embeddings.create(model=self._model, input=texts)
+        # A provider that will not embed is an operational failure rather than
+        # a question the corpus could not answer, and it is reported as one
+        # (core/openai_client.py). Wrapped at the call rather than at whoever
+        # made it, because this is the line that knows the SDK is being spoken
+        # to -- the pipeline above only knows it asked an Embedder.
+        with provider_failures():
+            response = self._client.embeddings.create(model=self._model, input=texts)
         return [item.embedding for item in response.data]
 
 

@@ -41,6 +41,18 @@ Source type 與 Locator,展開就是生成當時拿到的那段文字。
 turn 都標出它當初是在哪個 Scope 下被回答的,所以改了限制只影響下一題,不會回頭改寫
 上一題。
 
+選單底下是兩個決定「拿多少 Evidence」的旋鈕:一次檢索幾段 Chunk(top-k),以及同一份
+Document 最多出幾段。兩個都以 `config.py` 的設定為預設值,所以沒動過的頁面答得跟命令列
+不帶參數一樣;把後者調小,就看得出一個答案是靠好幾份 Document 撐起來的,還是被一份長
+筆記把卡片全佔滿了。τ 不在上面:它是 embedding model 的性質而不是偏好(ADR-0003),
+頁面上一個 per-question 的浮點數會繞過 DistanceThreshold 要擋的那件事,理由跟命令列
+沒有 `--distance-threshold` 一樣。
+
+叫不到 language model 的時候——沒有金鑰、provider 出錯——頁面給的是一句話而不是
+traceback,而且刻意跟兩種 Abstention 長得都不一樣:configuration 的問題被讀成「我的
+筆記沒寫」,使用者只會以為自己的語料比實際上差。至於 τ 配錯 embedding model,那是
+misconfiguration 而不是 operational hiccup,照樣在啟動時大聲失敗。
+
 它讀的是命令列同一份 Document registry 與同一個向量庫,所以 `OPENAI_API_KEY` 的
 要求也一樣。
 

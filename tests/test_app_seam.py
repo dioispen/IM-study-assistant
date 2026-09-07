@@ -28,6 +28,7 @@ from config import DISTANCE_THRESHOLD, DOMAINS, MAX_CHUNKS_PER_DOCUMENT, TOP_K
 from core.ask import ask
 from core.gate import ABSTENTION_TEXT
 from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL
+from core.openai_client import ProviderFailure
 from core.registry import Registry
 from core.store import ChunkFilter, VectorStore
 from presentation import describe_filter, provisional_threshold_notice
@@ -200,14 +201,25 @@ def _ask_on_the_page(page: AppTest, question: str) -> AppTest:
     return page.chat_input[0].set_value(question).run()
 
 
-def _evidence_through_the_seam(corpus, question=COVERED_QUESTION, chunk_filter=None):
-    """What `ask` returns for `question` over the same corpus, under the same
-    configured retrieval the page runs on.
+def _evidence_through_the_seam(
+    corpus,
+    question=COVERED_QUESTION,
+    chunk_filter=None,
+    top_k=TOP_K,
+    max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
+):
+    """What `ask` returns for `question` over the same corpus, under the
+    retrieval the page was left set to.
 
     The cards are read against this rather than against a list retyped here, so
     what the assertions say is that the page and the pipeline agree -- a page
     that dropped a Chunk or added one of its own is red even if both it and a
     constant were changed together.
+
+    The two retrieval arguments default to the configured values, which is what
+    the page defaults its own controls to (#27): a test that turns neither knob
+    passes nothing about them, and one that turns a knob on the page passes the
+    same number here.
     """
     _registry, store, embedder = ingest_mixed(corpus)
     return ask(
@@ -215,10 +227,10 @@ def _evidence_through_the_seam(corpus, question=COVERED_QUESTION, chunk_filter=N
         embedder,
         store,
         ScriptedGenerator(),
-        top_k=TOP_K,
+        top_k=top_k,
         distance_threshold=GATE_TAU,
         chunk_filter=chunk_filter,
-        max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
+        max_chunks_per_document=max_chunks_per_document,
     ).evidence
 
 
@@ -865,3 +877,269 @@ def test_a_derived_tau_leaves_this_page_with_no_notice_to_show(monkeypatch, corp
     assert [caption.value for caption in page.caption] == [
         interface.scope_caption(ChunkFilter())
     ]
+
+
+# What each control is turned to when a test turns it. Both are away from the
+# configured default in the direction that narrows the Evidence, because that
+# is the change a reader can count on the page: fewer cards, or cards drawn
+# from more Documents.
+FEWER_CHUNKS = 3
+ONE_PER_DOCUMENT = 1
+
+# A model DISTANCE_THRESHOLD was not set for. Any name but the configured one
+# would do; a real sibling model is used because the mistake this guards
+# against is a real one -- an embedding model swapped in config.py with tau
+# left behind (ADR-0003).
+OTHER_EMBEDDING_MODEL = "text-embedding-3-large"
+
+# The provider's own words in the two operational failures this page has to
+# render. Taken from what the OpenAI SDK says rather than invented, because
+# what the page must not do is replace them: the missing-key text is the one
+# that tells the reader which environment variable to set, and it is
+# underscored either side.
+MISSING_KEY_DETAIL = (
+    "The api_key client option must be set either by passing api_key to the "
+    "client or by setting the OPENAI_API_KEY environment variable"
+)
+PROVIDER_ERROR_DETAIL = "Connection error."
+
+
+class FailingGenerator:
+    """A provider that will not answer: the operational failure an outage, a
+    rate limit or a revoked key arrives as."""
+
+    def generate(self, prompt: str) -> str:
+        raise ProviderFailure(PROVIDER_ERROR_DETAIL)
+
+
+class FailsOnceGenerator:
+    """Fails the first question and answers every one after it -- a hiccup
+    rather than a page that can never work, which is what lets a test ask what
+    the session kept afterwards."""
+
+    def __init__(self):
+        self._scripted = ScriptedGenerator()
+        self._failed = False
+
+    def generate(self, prompt: str) -> str:
+        if not self._failed:
+            self._failed = True
+            raise ProviderFailure(PROVIDER_ERROR_DETAIL)
+        return self._scripted.generate(prompt)
+
+
+def _unreachable_provider_factory(detail):
+    """A factory that cannot build its dependencies at all.
+
+    The missing-key case: the client is constructed before any question is
+    typed, so this failure arrives while the page is being opened rather than
+    while an answer is being produced -- and the page has to survive it with
+    something on screen.
+    """
+
+    def build_dependencies() -> interface.Dependencies:
+        raise ProviderFailure(detail)
+
+    return build_dependencies
+
+
+def _misconfigured_tau_factory():
+    """A factory whose tau was set for another embedding model.
+
+    Runs the real assertion out of config.py rather than raising something
+    shaped like it, so the test below goes red the day that assertion is
+    softened into a caught failure.
+    """
+
+    def build_dependencies() -> interface.Dependencies:
+        DISTANCE_THRESHOLD.for_model(OTHER_EMBEDDING_MODEL)
+        raise AssertionError("the threshold pairing should have failed first")
+
+    return build_dependencies
+
+
+def _set_retrieval(page: AppTest, **controls) -> AppTest:
+    """The advanced controls as a reader turns them.
+
+    Keyed by the `ask` parameter each control fills, exactly as the Scope menus
+    are keyed by the ChunkFilter field they fill -- so a test that named a
+    widget anything else would be describing a translation step the page does
+    not have.
+    """
+    for parameter, value in controls.items():
+        page.number_input(parameter).set_value(value).run()
+    return page
+
+
+def test_the_advanced_controls_default_to_the_configured_retrieval(monkeypatch, corpus):
+    # A page opened and not touched answers exactly as the command line does
+    # with no flags: the controls are a way to depart from the configuration,
+    # not a second place the configuration is written down.
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    assert page.number_input(interface.TOP_K_KEY).value == TOP_K
+    assert (
+        page.number_input(interface.MAX_PER_DOCUMENT_KEY).value
+        == MAX_CHUNKS_PER_DOCUMENT
+    )
+
+
+def test_the_controls_can_be_turned_to_every_configured_value():
+    # A ceiling beneath a value a control defaults to is a page that cannot
+    # draw its own defaults: Streamlit refuses a number_input whose value is
+    # above its max rather than clamping it, so the page would die on a
+    # traceback before anything else on it was reached. The cap is the one that
+    # bites -- a cap well above top-k is the non-binding baseline the Week 7
+    # sweep reads against (PLAN.md §第 7 週), and config.py is where it would be
+    # set.
+    assert interface.MAX_RETRIEVED >= TOP_K
+    assert interface.MAX_RETRIEVED >= MAX_CHUNKS_PER_DOCUMENT
+    assert interface.MIN_RETRIEVED <= min(TOP_K, MAX_CHUNKS_PER_DOCUMENT)
+
+
+def test_asking_for_fewer_chunks_shows_fewer_cards(monkeypatch, corpus):
+    # Turning the knob has to change what is on screen, or it is a setting the
+    # reader cannot tell is connected to anything. Read against the seam under
+    # the same top-k, so what is asserted is that the page passed the number on
+    # rather than that it drew some smaller number of cards of its own.
+    fewer = _evidence_through_the_seam(corpus, top_k=FEWER_CHUNKS)
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    _set_retrieval(page, top_k=FEWER_CHUNKS)
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert page.exception == []
+    assert [card.label for card in page.expander] == [
+        interface.card_label(chunk) for chunk in fewer
+    ]
+    assert len(page.expander) == FEWER_CHUNKS < len(EXPECTED_CARDS)
+
+
+def test_a_tighter_cap_spreads_the_cards_across_more_documents(monkeypatch, corpus):
+    # What the cap is for: noticing when every card comes from one Document.
+    # At the configured two, hash_table.md supplies two of the five cards; at
+    # one it cannot, and the slot it gives up goes to a Document further down
+    # the ranking. So the cap changes which cards appear rather than only how
+    # many, which is the change a reader reads it by.
+    uncapped = _evidence_through_the_seam(corpus)
+    capped = _evidence_through_the_seam(
+        corpus, max_chunks_per_document=ONE_PER_DOCUMENT
+    )
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    _set_retrieval(page, max_chunks_per_document=ONE_PER_DOCUMENT)
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert page.exception == []
+    assert [card.label for card in page.expander] == [
+        interface.card_label(chunk) for chunk in capped
+    ]
+    assert capped != uncapped
+    assert len({chunk.doc_id for chunk in capped}) == len(capped)
+
+
+def test_tau_is_not_adjustable_from_the_page(monkeypatch, corpus):
+    # tau is a derived property of the embedding model (ADR-0003) rather than a
+    # preference, and a per-question float on this page would slip past the
+    # pairing DistanceThreshold exists to enforce -- the same reason the command
+    # line has no --distance-threshold. So the page's numeric controls are
+    # exactly the two retrieval knobs, and no other widget offers a threshold.
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    assert [control.label for control in page.number_input] == [
+        interface.TOP_K_LABEL,
+        interface.MAX_PER_DOCUMENT_LABEL,
+    ]
+    assert page.slider == []
+    assert page.text_input == []
+
+
+def test_a_missing_api_key_is_a_message_rather_than_a_traceback(monkeypatch):
+    # A configuration problem must not reach the reader as a traceback, and
+    # must not be mistakable for a knowledge gap: the page says the provider
+    # could not be reached, in neither of the shapes an Abstention wears.
+    page = _open_page(monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL))
+
+    assert page.exception == []
+    assert [block.value for block in page.error] == [
+        interface.provider_failure_notice(ProviderFailure(MISSING_KEY_DETAIL))
+    ]
+    assert page.warning == []
+    assert page.info == []
+    assert ABSTENTION_TEXT not in _shown(page)
+
+
+def test_a_missing_api_key_message_keeps_the_providers_own_words(monkeypatch):
+    # The SDK's text is the half that says what to do about it, and it names an
+    # environment variable underscored either side. A page that let that be
+    # read as Markdown would show the reader a differently spelled variable
+    # name, which is the failure `as_written` exists to prevent.
+    page = _open_page(monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL))
+
+    [message] = [block.value for block in page.error]
+
+    assert interface.as_written(MISSING_KEY_DETAIL) in message
+
+
+def test_a_provider_error_while_answering_is_a_message_rather_than_a_traceback(
+    monkeypatch, corpus
+):
+    # The same for a provider that fails mid-question. Nothing is drawn as an
+    # answer and nothing as an Abstention: the question was not answered, and a
+    # page that showed the retrieved cards under an error would be citing
+    # Evidence for an answer that was never produced.
+    page = _open_page(monkeypatch, _factory(corpus, generator=FailingGenerator()))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+
+    assert page.exception == []
+    assert [block.value for block in page.error] == [
+        interface.provider_failure_notice(ProviderFailure(PROVIDER_ERROR_DETAIL))
+    ]
+    assert page.warning == []
+    assert page.info == []
+    assert page.expander == []
+
+
+def test_a_question_the_provider_failed_on_is_not_kept_as_a_turn(monkeypatch, corpus):
+    # A Turn is a question together with the Answer it produced (CONTEXT.md),
+    # and a failed question produced none -- so the session keeps nothing, and
+    # the reader is not left scrolling past an error message dressed as an
+    # answer they once got.
+    page = _open_page(monkeypatch, _factory(corpus, generator=FailsOnceGenerator()))
+
+    _ask_on_the_page(page, COVERED_QUESTION)
+    _ask_on_the_page(page, SECOND_COVERED_QUESTION)
+
+    assert page.exception == []
+    assert page.error == []
+    assert SECOND_COVERED_QUESTION in _shown(page)
+    assert COVERED_QUESTION not in _shown(page)
+    assert [caption.value for caption in page.caption] == [
+        interface.scope_caption(ChunkFilter())
+    ]
+
+
+def test_a_tau_from_another_embedding_model_still_fails_loudly(monkeypatch, corpus):
+    # The one failure this page must not render politely. A tau belonging to
+    # another embedding model is a misconfiguration rather than an operational
+    # hiccup, and a page that caught it would leave a mis-set gate running
+    # behind a message the reader is invited to dismiss (ADR-0003).
+    page = _open_page(monkeypatch, _misconfigured_tau_factory())
+
+    assert page.exception != []
+    assert page.error == []
+
+
+def test_the_threshold_pairing_is_asserted_before_the_page_reaches_the_provider(
+    monkeypatch,
+):
+    # And it is loud by the class hierarchy rather than by the order the except
+    # clauses happen to be written in: a RuntimeError is not a ProviderFailure,
+    # so nothing this page catches can catch it.
+    monkeypatch.setattr(interface, "EMBEDDING_MODEL", OTHER_EMBEDDING_MODEL)
+
+    with pytest.raises(RuntimeError) as raised:
+        interface.build_dependencies()
+
+    assert not isinstance(raised.value, ProviderFailure)

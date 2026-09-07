@@ -102,6 +102,15 @@ correct outcome on a Trap question and a failure on any other; both rates are
 tracked, because either one alone can be gamed.
 _Avoid_: refusal, fallback, no-answer
 
+**Provider failure**:
+The language model could not be reached, or would not answer — a missing key, a
+rate limit, an outage. Never an Abstention and never scored as one: an
+Abstention is something the system decided about the Evidence, while this is a
+question that was never asked. Told apart on every surface, because a
+configuration problem that reads as a knowledge gap teaches the reader their
+corpus is worse than it is.
+_Avoid_: error, exception, API failure
+
 ## A sitting with the system
 
 **Turn**:

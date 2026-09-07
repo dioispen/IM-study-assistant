@@ -10,7 +10,7 @@ their own tests (ADR-0008).
 
 from typing import Protocol
 
-from core.openai_client import default_openai_client
+from core.openai_client import default_openai_client, provider_failures
 from core.store import RetrievedChunk
 
 # The one line the backstop declares itself with. Uppercase and underscored so
@@ -79,10 +79,17 @@ class OpenAIGenerator:
         self._model = model
 
     def generate(self, prompt: str) -> str:
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # As the embedder's call: a provider that will not answer is reported
+        # as an operational failure and never as an Abstention. The two are
+        # opposite claims -- one says the Evidence does not support an answer,
+        # this one says nothing was ever asked -- and ADR-0003's layers are
+        # only worth telling apart if a failure to reach the model is not
+        # quietly counted as one of them.
+        with provider_failures():
+            response = self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+            )
         # `content` is optional in the SDK -- a completion that produced no
         # text at all comes back as None. Coerced here rather than downstream
         # so this really does satisfy `Generator`, which the pipeline reads as
