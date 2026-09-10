@@ -19,6 +19,7 @@ what a model would have said.
 """
 
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import interface
@@ -138,14 +139,6 @@ class ScriptedGenerator:
         return _nth_answer(self._answered)
 
 
-class ExplodingEmbedder:
-    """Fails the test if a question is embedded -- what an empty corpus must be
-    reported without."""
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        raise AssertionError("an empty corpus should be reported before embedding")
-
-
 class ExplodingGenerator:
     """Fails the test if generation is reached."""
 
@@ -203,9 +196,11 @@ def _factory(corpus, generator=None, embedder=None):
         return interface.Dependencies(
             registry=Registry(corpus / "documents.sqlite"),
             store=VectorStore(path=corpus / "chroma"),
-            embedder=embedder,
-            generator=generator,
-            distance_threshold=GATE_TAU,
+            open_models=lambda: interface.Models(
+                embedder=embedder,
+                generator=generator,
+                distance_threshold=GATE_TAU,
+            ),
         )
 
     return build_dependencies
@@ -213,31 +208,73 @@ def _factory(corpus, generator=None, embedder=None):
 
 def _empty_factory(tmp_path):
     """The same, over a registry and store never ingested into -- a fresh
-    checkout, whose embedder and generator fail the test if either is reached."""
+    checkout, whose models fail the test if either is so much as constructed.
+
+    Exploding at construction rather than at the call, because that is the
+    claim (#31): what an empty corpus has to be reported without is not merely
+    a question embedded, but a client built for a provider the reader has no
+    reason to have configured yet.
+    """
+
+    def open_models() -> interface.Models:
+        raise AssertionError(
+            "an empty corpus should be reported before a model is constructed"
+        )
 
     def build_dependencies() -> interface.Dependencies:
         return interface.Dependencies(
             registry=Registry(tmp_path / "documents.sqlite"),
             store=VectorStore(path=tmp_path / "chroma"),
-            embedder=ExplodingEmbedder(),
-            generator=ExplodingGenerator(),
-            distance_threshold=GATE_TAU,
+            open_models=open_models,
         )
 
     return build_dependencies
 
 
-def _open_page(monkeypatch, factory) -> AppTest:
+def _real_factory(root):
+    """The page's own `build_dependencies`, pointed at `root`.
+
+    Not a double: this is the function app.py runs, reached through the same
+    hook and running the same construction in the same order. What the three
+    paths do is keep it off the configured corpus and off whatever `.env` the
+    machine running the suite happens to have -- which is the only way a test
+    can say "with no OPENAI_API_KEY" and mean it. The `.env` beside interface.py
+    is a fallback the real page reads, so a test that only cleared the
+    environment would be handed a key anyway and would pass without ever having
+    been in the situation it describes.
+    """
+    return partial(
+        interface.build_dependencies,
+        registry_path=root / "documents.sqlite",
+        chroma_path=root / "chroma",
+        env_path=root / ".env",
+    )
+
+
+# What a run is allowed when it will construct the real OpenAI client. The SDK
+# is imported at that moment and never before -- deliberately, so that importing
+# anything under core costs no openai (core/openai_client.py) -- and on a cold
+# process that first import alone takes longer than AppTest's three-second
+# default allows the whole run. Nothing here is slow; the import is just inside
+# the run rather than before it.
+SDK_IMPORT_TIMEOUT = 30
+
+
+def _open_page(monkeypatch, factory, timeout=None) -> AppTest:
     """The real app script, run with its one factory hook replaced.
 
     Replaced before the script runs, and on the module the script imports, which
     is the whole reason that module exists: Streamlit re-executes the script
     itself on every run, so a hook defined in the script could never be the one
     a test had substituted.
+
+    `timeout` is AppTest's own, left at its default for every run that stays
+    offline and raised only by the runs that construct the real client -- see
+    SDK_IMPORT_TIMEOUT for what is slow about those and why it is not this page.
     """
     monkeypatch.setattr(interface, "build_dependencies", factory)
     page = AppTest.from_file(APP)
-    page.run()
+    page.run(timeout=timeout)
     return page
 
 
@@ -422,16 +459,36 @@ def test_an_empty_corpus_says_so_rather_than_abstaining(monkeypatch, tmp_path):
     assert ABSTENTION_TEXT not in _shown(page)
 
 
-def test_an_empty_corpus_is_reported_before_a_question_is_embedded(monkeypatch, tmp_path):
+def test_an_empty_corpus_is_reported_before_a_model_is_constructed(monkeypatch, tmp_path):
     # Read off the Document registry, which is the authority on what Documents
     # exist (ADR-0001) -- not inferred by asking something and seeing what came
-    # back. The embedder fails the test if it is reached, so an implementation
-    # that probed the corpus with a question would be red here even though its
-    # page said the same thing.
+    # back, and not after building the clients that asking would need. The
+    # models fail the test if they are constructed at all, so an implementation
+    # that reached a provider first would be red here even though its page said
+    # the same thing.
     page = _open_page(monkeypatch, _empty_factory(tmp_path))
 
     assert page.exception == []
     assert page.chat_input == []
+
+
+def test_a_fresh_checkout_with_no_api_key_still_says_the_corpus_is_empty(
+    monkeypatch, tmp_path
+):
+    # The page's own construction path, with the key genuinely absent -- which
+    # is the state a fresh checkout is really in: nothing ingested *and* no
+    # provider configured. Only one of those is what the reader has to do
+    # something about, and being told about the key would send them to
+    # configure a provider before they have a corpus to query (#31). The
+    # registry is knowable without a provider, so it is read first and the
+    # emptiness is the diagnosis.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    page = _open_page(monkeypatch, _real_factory(tmp_path))
+
+    assert page.exception == []
+    assert interface.EMPTY_CORPUS_NOTICE in _shown(page)
+    assert page.error == []
 
 
 def test_the_second_covered_question_reads_its_own_evidence(corpus):
@@ -993,11 +1050,22 @@ ONE_PER_DOCUMENT = 1
 # left behind (ADR-0003).
 OTHER_EMBEDDING_MODEL = "text-embedding-3-large"
 
+# The one thing the SDK's missing-key text has to still be saying by the time
+# it reaches the reader, whichever sentence a version of the SDK wraps it in:
+# the name of the variable to set. Underscored either side, which is why the
+# page has to hand it over as written rather than as Markdown.
+API_KEY_VARIABLE = "OPENAI_API_KEY"
+
 # The provider's own words in the two operational failures this page has to
 # render. Taken from what the OpenAI SDK says rather than invented, because
 # what the page must not do is replace them: the missing-key text is the one
 # that tells the reader which environment variable to set, and it is
 # underscored either side.
+#
+# A copy, and so a copy of one version's wording -- these two drive doubles,
+# which is what makes them a fixed string at all. What the installed SDK
+# actually says on a keyless machine is asserted where it is actually raised,
+# against API_KEY_VARIABLE rather than against a sentence.
 MISSING_KEY_DETAIL = (
     "The api_key client option must be set either by passing api_key to the "
     "client or by setting the OPENAI_API_KEY environment variable"
@@ -1029,17 +1097,27 @@ class FailsOnceGenerator:
         return self._scripted.generate(prompt)
 
 
-def _unreachable_provider_factory(detail):
-    """A factory that cannot build its dependencies at all.
+def _unreachable_provider_factory(detail, corpus):
+    """The same dependencies, except that the models cannot be opened.
 
-    The missing-key case: the client is constructed before any question is
+    The missing-key case: the clients are constructed before any question is
     typed, so this failure arrives while the page is being opened rather than
     while an answer is being produced -- and the page has to survive it with
     something on screen.
+
+    Over an ingested corpus, because that is when a missing key is the true
+    diagnosis. With nothing ingested the page never gets this far and says the
+    other thing instead (#31), which is why the corpus half of the record is
+    the real one here rather than an empty stand-in.
     """
 
-    def build_dependencies() -> interface.Dependencies:
+    def open_models() -> interface.Models:
         raise ProviderFailure(detail)
+
+    built = _factory(corpus)
+
+    def build_dependencies() -> interface.Dependencies:
+        return replace(built(), open_models=open_models)
 
     return build_dependencies
 
@@ -1155,11 +1233,13 @@ def test_tau_is_not_adjustable_from_the_page(monkeypatch, corpus):
     assert page.text_input == []
 
 
-def test_a_missing_api_key_is_a_message_rather_than_a_traceback(monkeypatch):
+def test_a_missing_api_key_is_a_message_rather_than_a_traceback(monkeypatch, corpus):
     # A configuration problem must not reach the reader as a traceback, and
     # must not be mistakable for a knowledge gap: the page says the provider
     # could not be reached, in neither of the shapes an Abstention wears.
-    page = _open_page(monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL))
+    page = _open_page(
+        monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL, corpus)
+    )
 
     assert page.exception == []
     assert [block.value for block in page.error] == [
@@ -1170,16 +1250,46 @@ def test_a_missing_api_key_is_a_message_rather_than_a_traceback(monkeypatch):
     assert ABSTENTION_TEXT not in _shown(page)
 
 
-def test_a_missing_api_key_message_keeps_the_providers_own_words(monkeypatch):
+def test_a_missing_api_key_message_keeps_the_providers_own_words(monkeypatch, corpus):
     # The SDK's text is the half that says what to do about it, and it names an
     # environment variable underscored either side. A page that let that be
     # read as Markdown would show the reader a differently spelled variable
     # name, which is the failure `as_written` exists to prevent.
-    page = _open_page(monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL))
+    page = _open_page(
+        monkeypatch, _unreachable_provider_factory(MISSING_KEY_DETAIL, corpus)
+    )
 
     [message] = [block.value for block in page.error]
 
     assert interface.as_written(MISSING_KEY_DETAIL) in message
+
+
+def test_a_corpus_with_no_api_key_still_reports_the_provider_it_could_not_reach(
+    monkeypatch, corpus
+):
+    # The other half of #31, over the same real construction path: once there
+    # *is* a corpus, the missing key is the true diagnosis again, and the page
+    # reaches the provider and says so. Reading the registry first moved that
+    # message behind a condition; it did not take it away.
+    #
+    # The provider's own words, out of the SDK rather than out of a double, so
+    # that what is asserted is that the real path still gets far enough to be
+    # told a key is missing.
+    #
+    # Ingested here rather than by the factory, because the factory is the real
+    # `build_dependencies` and the real one ingests nothing -- it opens what is
+    # on disk. Filling the directory is this test's own setup, and it is what
+    # separates this case from the empty-corpus one above.
+    ingest_mixed(corpus)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    page = _open_page(monkeypatch, _real_factory(corpus), timeout=SDK_IMPORT_TIMEOUT)
+
+    [message] = [block.value for block in page.error]
+
+    assert page.exception == []
+    assert interface.as_written(API_KEY_VARIABLE) in message
+    assert interface.EMPTY_CORPUS_NOTICE not in _shown(page)
 
 
 def test_a_provider_error_while_answering_is_a_message_rather_than_a_traceback(
@@ -1233,14 +1343,20 @@ def test_a_tau_from_another_embedding_model_still_fails_loudly(monkeypatch, corp
 
 
 def test_the_threshold_pairing_is_asserted_before_the_page_reaches_the_provider(
-    monkeypatch,
+    monkeypatch, tmp_path
 ):
     # And it is loud by the class hierarchy rather than by the order the except
     # clauses happen to be written in: a RuntimeError is not a ProviderFailure,
     # so nothing this page catches can catch it.
+    #
+    # Pointed at an empty directory rather than left on the configured paths.
+    # The claim is that the pairing is asserted before anything else happens, so
+    # the day it stops being first this test has to go red over a temporary
+    # corpus and an absent .env -- not by opening whoever is running it their
+    # own data directory and reading their own key.
     monkeypatch.setattr(interface, "EMBEDDING_MODEL", OTHER_EMBEDDING_MODEL)
 
     with pytest.raises(RuntimeError) as raised:
-        interface.build_dependencies()
+        _real_factory(tmp_path)()
 
     assert not isinstance(raised.value, ProviderFailure)

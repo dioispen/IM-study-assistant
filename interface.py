@@ -17,6 +17,7 @@ Not the script Streamlit runs -- that is app.py, and the split is what makes
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from config import (
+    CHROMA_PATH,
     DISTANCE_THRESHOLD,
     DOMAINS,
     EMBEDDING_MODEL,
@@ -223,6 +225,36 @@ def card_label(chunk: RetrievedChunk) -> str:
 
 
 @dataclass(frozen=True)
+class Models:
+    """The two language models a question is answered through -- the ones
+    config.py names as EMBEDDING_MODEL and GENERATION_MODEL -- and the τ that
+    belongs to the first of them.
+
+    Held apart from the corpus half of Dependencies because they are the half
+    that needs a provider: constructing either one reaches for a key, while the
+    registry and the store are readable without one. That is the whole reason
+    the two halves are separable at all -- see Dependencies.
+
+    The threshold is here rather than beside the store, for the reason ADR-0003
+    gives: τ is a property of the embedding model. A substituted embedder scores
+    distances in its own geometry, so it has to bring the τ that was set for it,
+    and putting the two in one record is what makes reading a configured τ over
+    an injected model impossible rather than merely discouraged -- that pairing
+    is the confound `DistanceThreshold.for_model` exists to refuse.
+
+    Deferred with the models, but not *derived* with them: the assertion that τ
+    was set for the model in use is made eagerly, in build_dependencies, and
+    only its result is carried here. What that assertion reads is a model name
+    out of config.py, which needs nothing constructed -- so the misconfiguration
+    still fails at startup rather than waiting behind a corpus.
+    """
+
+    embedder: Embedder
+    generator: Generator
+    distance_threshold: float
+
+
+@dataclass(frozen=True)
 class Dependencies:
     """Everything the page reaches the outside world through, in one value.
 
@@ -231,45 +263,85 @@ class Dependencies:
     configuration and secrets -- with no test-only branch anywhere inside the
     page.
 
-    The threshold belongs here beside the embedder, not read from config at the
-    point of use, for the reason ADR-0003 gives: τ is a property of the
-    embedding model. A substituted embedder scores distances in its own
-    geometry, so it has to bring the τ that was set for it; reading a configured
-    τ over an injected model is exactly the confound `DistanceThreshold.for_model`
-    exists to refuse.
+    Staged rather than flat, which is what #31 is about. The corpus half is open
+    by the time the record is handed over; the models are behind a call that has
+    not been made yet. What the registry says -- whether anything has been
+    ingested at all -- is knowable without a provider, so the page can read it
+    and answer for an empty corpus before anything needs a key. A record holding
+    two live clients could not be built at all on a fresh checkout, and the
+    notice written for precisely that reader would sit unreachable behind the
+    traceback of building it.
+
+    Only what needs a provider is behind the call. τ is not on this half at all
+    -- it rides with the embedder it was set for, on Models -- while the
+    assertion pairing it to the model in use is made eagerly, before this record
+    exists. Deferring a *client* costs nothing; deferring that assertion would
+    let a misconfiguration hide behind an empty corpus.
     """
 
     registry: Registry
     store: VectorStore
-    embedder: Embedder
-    generator: Generator
-    distance_threshold: float
+    open_models: Callable[[], Models]
 
 
-def build_dependencies() -> Dependencies:
+# The .env beside this file, as a path rather than as an expression at the point
+# of use. A fallback and not the authority -- an OPENAI_API_KEY already in the
+# environment wins -- and named here so that a test meaning "with no key" can
+# say that a machine's own .env is not read either. Clearing the environment
+# alone would have the key handed straight back, and the test would pass without
+# ever having been in the situation it describes.
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+
+
+def build_dependencies(
+    registry_path: Path = REGISTRY_PATH,
+    chroma_path: Path = CHROMA_PATH,
+    env_path: Path = ENV_PATH,
+) -> Dependencies:
     """Production's set: the configured models, over the corpus on disk.
 
     The page's one hook, and the one name a test replaces
     (tests/test_app_seam.py).
+
+    Every path it reads is a parameter defaulted to the configured value, so
+    that this construction -- this ordering, this laziness, this assertion -- is
+    reachable from a test rather than only from a machine whose data directory
+    and .env are the ones config.py names. A suite that could only substitute a
+    double for this function could never have caught #31, because what was wrong
+    was what the function itself built, and when.
     """
     # OPENAI_API_KEY reaches the OpenAI client through the environment, and the
     # .env beside this file is the fallback rather than the authority -- as
     # cli.py, for the reasons written there. Loaded here rather than at import
     # time so that importing this module still costs nothing and needs no key.
-    load_dotenv(Path(__file__).resolve().parent / ".env")
+    load_dotenv(env_path)
 
-    # Asserted before the store is opened or a key is needed, exactly as the
-    # command line asserts it: a τ belonging to another embedding model is a
-    # misconfiguration rather than a bad answer, so it fails loudly at startup
-    # instead of being rendered politely as an operational hiccup.
+    # Asserted before the store is opened and before any client is built,
+    # exactly as the command line asserts it: a τ belonging to another embedding
+    # model is a misconfiguration rather than a bad answer, so it fails loudly
+    # at startup instead of being rendered politely as an operational hiccup.
+    # First of everything here, so that an empty corpus cannot keep it quiet.
     threshold = DISTANCE_THRESHOLD.for_model(EMBEDDING_MODEL)
 
+    def open_models() -> Models:
+        """The provider clients, built at the moment the page asks for them.
+
+        Not at the moment this record is: `OpenAI()` reaches for a key as it is
+        constructed, and the page reads the registry first (#31). A
+        ProviderFailure out of here is therefore a page that has a corpus and
+        cannot reach the model for it -- which is the failure
+        PROVIDER_FAILURE_NOTICE is actually about.
+        """
+        return Models(
+            embedder=OpenAIEmbedder(model=EMBEDDING_MODEL),
+            generator=OpenAIGenerator(model=GENERATION_MODEL),
+            distance_threshold=threshold,
+        )
+
     return Dependencies(
-        registry=Registry(REGISTRY_PATH),
-        store=VectorStore(),
-        embedder=OpenAIEmbedder(model=EMBEDDING_MODEL),
-        generator=OpenAIGenerator(model=GENERATION_MODEL),
-        distance_threshold=threshold,
+        registry=Registry(registry_path),
+        store=VectorStore(path=chroma_path),
+        open_models=open_models,
     )
 
 
@@ -336,40 +408,53 @@ def session_turns() -> list[Turn]:
 def render_page() -> None:
     st.title(TITLE)
 
-    try:
-        dependencies = build_dependencies()
-    except ProviderFailure as failure:
-        # The missing-key case, and every other way the provider cannot be
-        # reached before a question is typed: the clients are constructed here,
-        # so this is a page that fails while it is being opened. Reported and
-        # returned from, because there is nothing behind it to draw -- a chat
-        # input over dependencies that do not exist is an invitation to type
-        # into a page that cannot answer.
-        #
-        # Not the threshold-to-embedding-model misconfiguration, which
-        # build_dependencies asserts first and raises RuntimeError for: that is
-        # not a hiccup to render politely, and ProviderFailure is not one of its
-        # ancestors, so this clause cannot catch it (core/openai_client.py).
-        #
-        # A fresh checkout with no key reaches this before the empty-corpus
-        # notice below, because the clients are built before the registry is
-        # read -- so the reader is told about the key when what they have to do
-        # next is ingest their notes. #31 moves the registry read ahead of the
-        # client construction, and this message stays for the case it is really
-        # about; nothing here needs to change when it does.
-        render_provider_failure(failure)
-        return
+    # Nothing here reaches a provider: the registry and the store are opened and
+    # the threshold pairing is asserted, both of which are knowable without a
+    # key. No ProviderFailure can come out of this line, so nothing catches one
+    # around it -- and the RuntimeError a τ set for another embedding model
+    # raises is left alone, to reach the console as the traceback config.py
+    # spelled its message for.
+    dependencies = build_dependencies()
 
     # Read off the registry, which is ADR-0001's authority on what Documents
     # exist, and read before anything is typed -- so the emptiness is reported
     # rather than discovered by embedding a question and interpreting the
     # abstention that comes back.
     #
+    # Read before the models are opened, too, and that ordering is the whole of
+    # #31. On a fresh checkout both things are true -- nothing is ingested and
+    # no key is set -- and only one of them is what the reader has to do next.
+    # Told about the key, they would go and configure a provider before having a
+    # corpus to query, and the ingest command this notice names needs that key
+    # anyway. What the registry says is knowable without a provider, so it is
+    # what the page finds out first.
+    #
     # Returned from before the sidebar as well as before the chat input: there
     # is nothing to scope and no corpus to summarise, and a Scope menu over an
     # empty corpus would offer the reader a way to narrow nothing.
     if not dependencies.registry.list():
         st.warning(EMPTY_CORPUS_NOTICE)
+        return
+
+    try:
+        models = dependencies.open_models()
+    except ProviderFailure as failure:
+        # The missing-key case, and every other way the provider cannot be
+        # reached before a question is typed: the clients are constructed here,
+        # so this is a page that fails while it is being opened. Reported and
+        # returned from, because there is nothing behind it to draw -- a chat
+        # input over models that do not exist is an invitation to type into a
+        # page that cannot answer.
+        #
+        # There is a corpus by the time this can happen, which is what makes the
+        # message the true one: the provider is what stands between this reader
+        # and an answer, rather than one of two things wrong at once (#31).
+        #
+        # Not the threshold-to-embedding-model misconfiguration, which
+        # build_dependencies asserts above and raises RuntimeError for: that is
+        # not a hiccup to render politely, and ProviderFailure is not one of its
+        # ancestors, so this clause cannot catch it (core/openai_client.py).
+        render_provider_failure(failure)
         return
 
     # Read before anything is drawn from it, because these are settings the
@@ -417,15 +502,15 @@ def render_page() -> None:
                 # 7 週), confounded before they start by a baseline that
                 # already did some of it.
                 question,
-                dependencies.embedder,
+                models.embedder,
                 dependencies.store,
-                dependencies.generator,
+                models.generator,
                 # What the sidebar is set to, passed straight through: the page
                 # is a front end for the retrieval built in #5 and reimplements
                 # none of it. The Scope travels back on the Answer, which is
                 # what lets the turn below say what it was answered under.
                 top_k=retrieval.top_k,
-                distance_threshold=dependencies.distance_threshold,
+                distance_threshold=models.distance_threshold,
                 chunk_filter=retrieval.chunk_filter,
                 max_chunks_per_document=retrieval.max_chunks_per_document,
             )
