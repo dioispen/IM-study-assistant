@@ -26,6 +26,7 @@ import presentation
 import pytest
 from config import DISTANCE_THRESHOLD, DOMAINS, MAX_CHUNKS_PER_DOCUMENT, TOP_K
 from core.ask import ask
+from core.embedder import FakeEmbedder
 from core.gate import ABSTENTION_TEXT
 from core.generator import BACKSTOP_ABSTENTION_TEXT, BACKSTOP_SENTINEL
 from core.openai_client import ProviderFailure
@@ -74,6 +75,20 @@ EXPECTED_SOURCE_TYPES = ["note", "textbook"]
 # (CONTEXT.md), so a menu that offered this would be a menu built from
 # somewhere other than the registry.
 UNINGESTED_SOURCE_TYPE = "paper"
+
+# A question wearing the punctuation a study corpus is full of: identifiers with
+# underscores in them, and the emphasis and backticks a reader types around the
+# terms they are asking about. Read as Markdown it comes back typeset --
+# `open_addressing` and `hash_table` joined into one italic run, `chaining`
+# emphasised, the backticks eaten.
+#
+# Here rather than in tests/mixed_corpus.py, because it is not about the corpus:
+# the terminal prints no question and so has nothing to escape (#30), and the
+# other suite over that fixture would have no use for it.
+#
+# Covered, at 0.46 against this corpus, so these tests run the ordinary path
+# rather than the gate's.
+MARKED_UP_QUESTION = "How does open_addressing differ from *chaining* in a `hash_table`?"
 
 
 @pytest.fixture(scope="module")
@@ -138,7 +153,31 @@ class ExplodingGenerator:
         raise AssertionError("nothing here should reach generation")
 
 
-def _factory(corpus, generator=None):
+class RecordingEmbedder:
+    """The fixture embedder, with a note of every text it was handed.
+
+    For the one claim that is about what left the page rather than about what
+    appeared on it: the question the reader typed is the question that gets
+    embedded. It reads the injected dependency at the boundary, not the app's
+    insides -- what the page sent to the model is outward behaviour, and a page
+    that retrieved against a display-escaped string would be quietly answering
+    a question nobody asked.
+
+    Its own FakeEmbedder rather than the one that ingested, which is safe
+    because FakeEmbedder is stateless and deterministic: the same text hashes
+    to the same vector in both.
+    """
+
+    def __init__(self):
+        self._embedder = FakeEmbedder()
+        self.embedded: list[str] = []
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.embedded.extend(texts)
+        return self._embedder.embed(texts)
+
+
+def _factory(corpus, generator=None, embedder=None):
     """The page's factory hook, over a corpus ingested into `corpus`.
 
     A factory that opens the corpus on every call, rather than one record built
@@ -151,8 +190,13 @@ def _factory(corpus, generator=None):
     τ travels with the embedder rather than being read from config, because it
     is a property of the embedding model (ADR-0003) and the model here is
     FakeEmbedder.
+
+    `embedder` is substituted only by the test that watches what the page sends
+    out. Everything else takes the one that ingested, which is what makes the
+    fixture's distances the page's distances.
     """
-    _registry, _store, embedder = ingest_mixed(corpus)
+    _registry, _store, ingested = ingest_mixed(corpus)
+    embedder = embedder or ingested
     generator = generator or ScriptedGenerator()
 
     def build_dependencies() -> interface.Dependencies:
@@ -493,6 +537,63 @@ def test_a_kept_turn_still_shows_the_answer_it_was_given(monkeypatch, corpus):
     assert _nth_answer(1) in _shown(page)
     assert _nth_answer(2) in _shown(page)
     assert _nth_answer(3) not in _shown(page)
+
+
+def test_a_question_is_shown_with_the_punctuation_it_was_typed_with(
+    monkeypatch, corpus
+):
+    # The question on screen is the question that was asked. A page that read it
+    # as Markdown would show a reader asking about `open_addressing` and
+    # `hash_table` one italic run spanning both, and the turn beneath it would
+    # be an answer captioned with something nobody typed.
+    #
+    # Read as `as_written` leaves it, which is what the other arbitrary strings
+    # on this page are already checked against: the widget is a Markdown widget,
+    # and a string reaches the reader intact by being escaped onto it.
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    _ask_on_the_page(page, MARKED_UP_QUESTION)
+
+    assert page.exception == []
+    assert interface.as_written(MARKED_UP_QUESTION) in _shown(page)
+
+
+def test_a_kept_turn_redraws_the_question_with_its_punctuation_intact(
+    monkeypatch, corpus
+):
+    # The same question, redrawn from the turn it was kept as rather than from
+    # the chat input. Both halves matter: a session is worth scrolling back
+    # through only if a question shown while in flight and the same question
+    # shown once kept are the same question, and the two would drift the moment
+    # only one of them were escaped.
+    page = _open_page(monkeypatch, _factory(corpus))
+
+    _ask_on_the_page(page, MARKED_UP_QUESTION)
+    _ask_on_the_page(page, SECOND_COVERED_QUESTION)
+
+    assert page.exception == []
+    assert interface.as_written(MARKED_UP_QUESTION) in _shown(page)
+
+
+def test_the_question_that_is_retrieved_against_is_the_one_that_was_typed(
+    monkeypatch, corpus
+):
+    # Escaping is display-only, and stops at the widget. The question that goes
+    # out to the Embedder is the reader's own string -- backslashes added for a
+    # Markdown widget would be embedded, and the page would be retrieving
+    # against something that was never asked.
+    #
+    # Not a difference in spelling only: under the token measure this embedder
+    # shares with chunking (ADR-0004), `hash_table` is one token and
+    # `hash\_table` is two, so an escape that got this far would move the
+    # question in the embedding space as well as on the page.
+    embedder = RecordingEmbedder()
+    page = _open_page(monkeypatch, _factory(corpus, embedder=embedder))
+
+    _ask_on_the_page(page, MARKED_UP_QUESTION)
+
+    assert page.exception == []
+    assert embedder.embedded == [MARKED_UP_QUESTION]
 
 
 def _scope_the_session(page: AppTest, **restrictions) -> AppTest:

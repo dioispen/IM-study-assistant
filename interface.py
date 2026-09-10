@@ -201,14 +201,14 @@ def as_written(text: str) -> str:
     """`text` as itself, once a Markdown widget has read it.
 
     Streamlit reads a widget label and a caption as Markdown, and nearly
-    everything this page shows is arbitrary text out of someone's corpus: a
-    Locator taken from their headings, a Source type they typed at the command
-    line. The corpus carries thirty Locators containing an asterisk today, and
-    a heading with two of them -- or a Source type with an underscore either
-    side -- would be typeset rather than shown. The terminal prints the same
-    strings literally, so the page would be describing one Evidence differently
-    from the other surface, which is the drift presentation.py exists to
-    prevent (#22).
+    everything this page shows is arbitrary text out of someone's corpus or
+    their own keyboard: a Locator taken from their headings, a Source type they
+    typed at the command line, the question they just asked. The corpus carries
+    thirty Locators containing an asterisk today, and a heading with two of them
+    -- or a Source type with an underscore either side -- would be typeset
+    rather than shown. The terminal prints the same strings literally, so the
+    page would be describing one Evidence differently from the other surface,
+    which is the drift presentation.py exists to prevent (#22).
 
     Escaped here rather than worded around there: what a card says is
     presentation.py's, and getting a plain string intact onto a widget is this
@@ -583,9 +583,26 @@ def render_turn(turn: Turn) -> None:
 
 
 def render_question(question: str) -> None:
-    """The question in the reader's own words, as they typed it."""
+    """The question in the reader's own words, as they typed it.
+
+    Escaped onto the widget, because a chat message is read as Markdown and a
+    question is the last arbitrary string on this page that was still going
+    onto one raw (`as_written`). A study corpus is made of identifiers, so this
+    is the string it mangles most: a question about `open_addressing` and
+    `hash_table` came back as one italic run, and a turn is only worth
+    scrolling back to if the question above an answer is the question that
+    produced it.
+
+    Display-only, and stops here. What `render_page` hands to `ask` is the
+    string the reader typed -- escaping it there would embed the backslashes
+    and retrieve against a question nobody asked.
+
+    Both paths, and by construction: the live question and the same question
+    redrawn from its kept turn are this one function, so neither can be
+    escaped without the other.
+    """
     with st.chat_message("user"):
-        st.markdown(question)
+        st.markdown(as_written(question))
 
 
 def scope_caption(chunk_filter: ChunkFilter) -> str:
